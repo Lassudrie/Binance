@@ -1,0 +1,84 @@
+[paths]
+raw_dir = "data/raw"
+bronze_dir = "data/bronze"
+silver_dir = "data/silver"
+gold_dir = "data/gold"
+metadata_dir = "data/metadata"
+reports_dir = "data/reports"
+
+[binance]
+market = "spot"
+frequency = "daily"
+verify_checksum = true
+timeout_seconds = 30
+
+[dataset]
+dataset_type = "trades"
+symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+start_date = "2024-01-01"
+end_date = "2025-12-31"
+
+[features]
+bar_size = "10m"
+feature_profile = "spot_10m_regime_pullback_v1"
+rolling_window_bars = 12
+volatility_window_bars = 14
+range_window_bars = 12
+normalization_window_bars = 96
+
+[strategy]
+name = "spot_10m_regime_pullback"
+position_size = 0.01
+
+[strategy.params]
+ema_fast_bars = 20
+ema_trend_bars = 200
+atr_bars = 14
+rsi_bars = 14
+rsi_min = 50.0
+rsi_max = 70.0
+min_atr_ratio = 0.0015
+use_taker_buy_ratio_filter = false
+taker_buy_ratio_min = 0.55
+stop_atr_multiple = 1.0
+target_atr_multiple = 1.2
+time_stop_bars = 6
+
+[execution]
+default_order_type = "market"
+maker_fee_bps = 1.0
+taker_fee_bps = 10.0
+slippage_bps = 2.0
+fallback_half_spread_bps = 1.0
+impact_bps_per_unit_participation = 0.0
+latency_bars = 1
+market_participation_cap = 1.0
+limit_participation_cap = 0.10
+limit_offset_bps = 1.0
+max_order_lifetime_bars = 3
+allow_limit_orders = false
+
+[portfolio]
+initial_cash = 100000.0
+allow_short = false
+
+[risk]
+max_holding_bars = 0
+stop_loss_bps = 0.0
+take_profit_bps = 0.0
+trailing_stop_bps = 0.0
+cooldown_bars_after_stop = 0
+risk_per_trade_fraction = 0.0025
+daily_loss_limit_r = 2.0
+max_open_positions = 1
+
+[validation]
+train_bars = 12960
+test_bars = 4320
+step_bars = 4320
+embargo_bars = 6
+bootstrap_resamples = 1000
+bootstrap_block_bars = 144
+
+[reporting]
+run_name = "spot_10m_regime_pullback_v1"

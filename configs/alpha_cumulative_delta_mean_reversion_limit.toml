@@ -1,0 +1,69 @@
+[paths]
+raw_dir = "data/raw"
+bronze_dir = "data/bronze"
+silver_dir = "data/silver"
+gold_dir = "data/gold"
+metadata_dir = "data/metadata"
+reports_dir = "data/reports"
+
+[binance]
+market = "spot"
+frequency = "daily"
+verify_checksum = true
+timeout_seconds = 30
+
+[dataset]
+dataset_type = "trades"
+symbols = ["BTCUSDT"]
+start_date = "2025-01-01"
+end_date = "2025-01-03"
+
+[features]
+bar_size = "5s"
+rolling_window_bars = 24
+volatility_window_bars = 48
+range_window_bars = 24
+normalization_window_bars = 96
+
+[strategy]
+name = "cumulative_delta_mean_reversion"
+position_size = 0.01
+
+[strategy.params]
+cumulative_delta_threshold = 1.0
+price_extension_threshold = 0.30
+exit_zscore_threshold = 0.20
+
+[execution]
+default_order_type = "limit"
+maker_fee_bps = 1.0
+taker_fee_bps = 5.0
+slippage_bps = 2.0
+fallback_half_spread_bps = 1.0
+impact_bps_per_unit_participation = 15.0
+latency_bars = 1
+market_participation_cap = 0.25
+limit_participation_cap = 0.10
+limit_offset_bps = 1.5
+max_order_lifetime_bars = 3
+allow_limit_orders = true
+
+[portfolio]
+initial_cash = 100000.0
+allow_short = true
+
+[risk]
+max_holding_bars = 36
+stop_loss_bps = 18.0
+take_profit_bps = 0.0
+trailing_stop_bps = 10.0
+cooldown_bars_after_stop = 6
+
+[validation]
+train_bars = 400
+test_bars = 160
+step_bars = 160
+embargo_bars = 1
+
+[reporting]
+run_name = "btcusdt_alpha_mean_reversion_limit"

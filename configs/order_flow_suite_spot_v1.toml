@@ -1,0 +1,75 @@
+[paths]
+raw_dir = "data/raw"
+bronze_dir = "data/bronze"
+silver_dir = "data/silver"
+gold_dir = "data/gold"
+metadata_dir = "data/metadata"
+reports_dir = "data/reports"
+
+[binance]
+market = "spot"
+frequency = "daily"
+verify_checksum = true
+timeout_seconds = 30
+
+[dataset]
+dataset_type = "trades"
+symbols = ["BTCUSDT", "ETHUSDT"]
+start_date = "2025-01-01"
+end_date = "2025-01-03"
+
+[features]
+bar_size = "5s"
+feature_profile = "order_flow_suite_5s_v1"
+rolling_window_bars = 24
+volatility_window_bars = 48
+range_window_bars = 24
+normalization_window_bars = 96
+
+[strategy]
+name = "cumdelta_reversion_v1"
+position_size = 0.01
+
+[strategy.params]
+entry_z = 1.5
+exit_z = 0.25
+vol_regime_min = 1.0
+
+[execution]
+default_order_type = "market"
+maker_fee_bps = 1.0
+taker_fee_bps = 5.0
+slippage_bps = 2.0
+fallback_half_spread_bps = 1.0
+impact_bps_per_unit_participation = 15.0
+latency_bars = 1
+market_participation_cap = 0.25
+limit_participation_cap = 0.10
+limit_offset_bps = 1.0
+max_order_lifetime_bars = 3
+allow_limit_orders = true
+
+[portfolio]
+initial_cash = 100000.0
+allow_short = false
+
+[risk]
+max_holding_bars = 0
+stop_loss_bps = 0.0
+take_profit_bps = 0.0
+trailing_stop_bps = 0.0
+cooldown_bars_after_stop = 0
+risk_per_trade_fraction = 0.0
+daily_loss_limit_r = 0.0
+max_open_positions = 1
+
+[validation]
+train_bars = 8640
+test_bars = 2880
+step_bars = 2880
+embargo_bars = 12
+bootstrap_resamples = 1000
+bootstrap_block_bars = 144
+
+[reporting]
+run_name = "order_flow_suite_spot_v1"

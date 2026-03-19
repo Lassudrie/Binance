@@ -1,0 +1,109 @@
+mode: paper_testnet
+symbols:
+  - BTCUSDT
+universe_seed: 31
+raw_dir: data/raw
+reports_dir: reports
+memory_dir: data/memory
+paper_local_record_raw: true
+seed: 42
+report_time: today
+enable_testnet_signed_endpoints: true
+
+gateway:
+  public_ws_base: "wss://stream.binance.com:9443/stream"
+  heartbeat_timeout_s: 8.0
+  request_timeout_s: 20
+  depth_stream: "100ms"
+  include_kline_1m: false
+  max_queue_size: 2500
+
+features:
+  horizons_sec:
+    - 1
+    - 5
+    - 15
+    - 30
+    - 60
+  feature_window_sec: 900
+  large_trade_quantile: 0.9
+  volatility_window_sec: 60
+  zscore_window: 200
+  microprice_window_sec: 120
+
+execution:
+  mode: paper_testnet
+  allow_short: false
+  initial_cash: 50000.0
+  taker_fee_bps: 10.0
+  maker_fee_bps: 2.0
+  base_spread_bps: 3.0
+  fallback_half_spread_bps: 1.5
+  impact_bps_per_unit_participation: 12.0
+  latency_ms: 300
+  market_participation_cap: 0.20
+  limit_order_book_depth_bps: 4.0
+  max_order_lifetime_s: 12
+  allow_limit_orders: true
+
+risk:
+  stale_data_s: 8.0
+  broken_ws_s: 14.0
+  abnormal_spread_bps: 300.0
+  abnormal_volatility_bps: 1000.0
+  max_position_size: 4.0
+  max_notional: 20000.0
+  max_concurrent_exposure: 1
+  cooldown_after_loss_s: 420
+  daily_loss_limit: 0.025
+  max_holding_time_s: 900
+  stop_loss_bps: 90.0
+  take_profit_bps: 120.0
+  trailing_stop_bps: 40.0
+  spread_gate_enabled: true
+  volatility_gate_enabled: true
+  max_consecutive_losses: 4
+
+strategy_library:
+  default: continuation
+  continuation:
+    name: continuation
+    enabled: true
+    params:
+      trend_alignment_threshold: 0.07
+      queue_imbalance_threshold: 0.05
+      microprice_drift_threshold_bps: 2.0
+      max_holding_time_s: 600
+      spread_bps_max: 220.0
+      volatility_bps_max: 900.0
+  exhaustion:
+    name: exhaustion
+    enabled: true
+    params:
+      burst_threshold: 2.4
+      extreme_flow_threshold: 2.1
+      decay_momentum_threshold: 0.4
+      max_holding_time_s: 540
+      spread_bps_max: 220.0
+      volatility_bps_max: 1050.0
+  hybrid:
+    name: hybrid
+    enabled: true
+    params:
+      regime_confidence_threshold: 0.55
+      continuation_label: continuation
+      exhaustion_label: exhaustion
+      time_exit_s: 540
+      spread_bps_max: 220.0
+      volatility_bps_max: 900.0
+
+learning:
+  enabled: true
+  duckdb_path: data/memory/learning_testnet.duckdb
+  min_samples_per_regime: 8
+  min_samples_total: 16
+  min_improvement_bps: 7.0
+  max_drawdown_bps: 150.0
+  rolling_window: 30
+  confidence: 0.8
+  enable_promotion: true

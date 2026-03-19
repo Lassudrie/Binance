@@ -1,0 +1,134 @@
+mode: paper_local
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+feature_profile: orderflow_hft_v1
+universe_seed: 31
+live_telemetry_interval_s: 30
+live_telemetry_top_k: 3
+raw_dir: data/raw
+reports_dir: reports
+memory_dir: data/memory
+paper_local_record_raw: true
+seed: 42
+report_time: today
+enable_testnet_signed_endpoints: false
+
+gateway:
+  public_ws_base: "wss://stream.binance.com:9443/stream"
+  heartbeat_timeout_s: 8.0
+  request_timeout_s: 20
+  depth_stream: "100ms"
+  include_kline_1m: false
+  max_queue_size: 2500
+
+features:
+  horizons_sec:
+    - 1
+    - 5
+    - 15
+    - 30
+    - 60
+    - 180
+  feature_window_sec: 900
+  large_trade_quantile: 0.9
+  volatility_window_sec: 60
+  zscore_window: 200
+  microprice_window_sec: 120
+
+execution:
+  mode: paper_local
+  allow_short: false
+  initial_cash: 100000.0
+  taker_fee_bps: 8.0
+  maker_fee_bps: 2.0
+  default_target_notional_usd: 500.0
+  min_target_notional_usd: 250.0
+  max_target_notional_usd: 1000.0
+  base_spread_bps: 2.0
+  fallback_half_spread_bps: 1.0
+  impact_bps_per_unit_participation: 8.0
+  market_sweep_depth_bps: 25.0
+  latency_ms: 250
+  market_participation_cap: 0.25
+  limit_order_book_depth_bps: 3.0
+  max_order_lifetime_s: 8
+  allow_limit_orders: true
+
+risk:
+  stale_data_s: 6.0
+  broken_ws_s: 10.0
+  abnormal_spread_bps: 220.0
+  abnormal_volatility_bps: 900.0
+  max_position_size: 8.0
+  max_notional: 40000.0
+  max_concurrent_exposure: 2
+  cooldown_after_loss_s: 300
+  daily_loss_limit: 0.02
+  max_holding_time_s: 1200
+  catastrophic_stop_loss_bps: 45.0
+  min_hold_before_soft_exit_s: 20
+  stop_loss_bps: 20.0
+  take_profit_bps: 35.0
+  trailing_stop_bps: 12.0
+  spread_gate_enabled: true
+  volatility_gate_enabled: true
+  max_consecutive_losses: 5
+
+strategy_library:
+  default: continuation
+  continuation:
+    name: continuation
+    enabled: true
+    params:
+      trend_alignment_threshold: 0.20
+      queue_imbalance_threshold: 0.99
+      microprice_drift_threshold_bps: 0.20
+      min_expected_net_edge_bps: 2.0
+      edge_fast_horizon_s: 15
+      edge_slow_horizon_s: 30
+      edge_fast_weight: 0.6
+      edge_slow_weight: 0.4
+      edge_cvd_bonus_bps: 1.5
+      edge_queue_bonus_bps: 4.0
+      edge_bonus_cap_bps: 12.0
+      min_momentum_5s_bps: 0.8
+      no_trade_z: 1.20
+      max_holding_time_s: 720
+      min_hold_before_discretionary_exit_s: 20
+      reverse_exit_cvd_z: 1.0
+      reverse_exit_queue_imbalance: 0.85
+      reverse_exit_microprice_drift_bps: 0.1
+      spread_bps_max: 1.0
+      volatility_bps_max: 700.0
+  exhaustion:
+    name: exhaustion
+    enabled: false
+    params:
+      burst_threshold: 2.2
+      extreme_flow_threshold: 2.0
+      decay_momentum_threshold: 0.35
+      max_holding_time_s: 540
+      spread_bps_max: 200.0
+      volatility_bps_max: 900.0
+  hybrid:
+    name: hybrid
+    enabled: false
+    params:
+      regime_confidence_threshold: 0.55
+      continuation_label: continuation
+      exhaustion_label: exhaustion
+      time_exit_s: 600
+      spread_bps_max: 190.0
+      volatility_bps_max: 750.0
+
+learning:
+  enabled: true
+  duckdb_path: data/memory/learning.duckdb
+  min_samples_per_regime: 10
+  min_samples_total: 24
+  min_improvement_bps: 6.0
+  max_drawdown_bps: 120.0
+  rolling_window: 50
+  confidence: 0.82
+  enable_promotion: true

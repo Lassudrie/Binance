@@ -1,0 +1,6 @@
+mode: paper_local
+symbols:
+  - BTCUSDT
+raw_dir: data/raw
+reports_dir: reports
+memory_dir: data/memory
