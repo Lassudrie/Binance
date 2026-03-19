@@ -53,6 +53,30 @@ def test_engine_pre_entry_gate_uses_projected_notional(tmp_path) -> None:
     assert reason == "risk_notional_limit"
 
 
+def test_engine_live_runtime_uses_received_time_for_freshness(tmp_path) -> None:
+    config = build_test_config(tmp_path, symbols=["BTCUSDT"], mode="paper_local")
+
+    engine = PaperEngine(config=config, depth_snapshot_client=None, runtime_clock="wall")
+    try:
+        market_time = datetime(2026, 1, 1, tzinfo=UTC)
+        received_at = market_time + timedelta(seconds=30)
+        assert engine._freshness_timestamp(market_time, now=received_at) == received_at
+    finally:
+        engine.close()
+
+
+def test_engine_event_runtime_preserves_market_time_for_freshness(tmp_path) -> None:
+    config = build_test_config(tmp_path, symbols=["BTCUSDT"], mode="paper_local")
+
+    engine = PaperEngine(config=config, depth_snapshot_client=None, runtime_clock="event")
+    try:
+        market_time = datetime(2026, 1, 1, tzinfo=UTC)
+        received_at = market_time + timedelta(seconds=30)
+        assert engine._freshness_timestamp(market_time, now=received_at) == market_time
+    finally:
+        engine.close()
+
+
 def test_engine_blocks_entry_when_expected_net_edge_is_too_small(tmp_path) -> None:
     config = build_test_config(tmp_path, symbols=["BTCUSDT"], mode="paper_local")
     config.strategy_library.continuation.params["min_expected_net_edge_bps"] = 3.0
@@ -183,6 +207,74 @@ def test_engine_entry_context_uses_longer_horizon_edge_and_conviction_bonus(tmp_
     assert float(context["expected_queue_bonus_bps"]) > 0.0
     assert float(context["expected_conviction_bonus_bps"]) > 4.2
     assert float(context["expected_net_edge_bps"]) >= 2.0
+
+
+def test_engine_limit_entry_context_uses_lower_cost_than_market(tmp_path) -> None:
+    config = build_test_config(tmp_path, symbols=["BTCUSDT"], mode="paper_local")
+
+    engine = PaperEngine(config=config, depth_snapshot_client=None, runtime_clock="event")
+    try:
+        engine.order_books["BTCUSDT"].apply_book_ticker(
+            BookTickerEvent(
+                symbol="BTCUSDT",
+                event_time=datetime(2026, 1, 1, tzinfo=UTC),
+                event_type="bookTicker",
+                raw={},
+                bid_price=99.995,
+                ask_price=100.005,
+                bid_qty=20.0,
+                ask_qty=20.0,
+            )
+        )
+        snapshot = FeatureSnapshot(
+            symbol="BTCUSDT",
+            event_time=datetime(2026, 1, 1, tzinfo=UTC),
+            features={
+                "microprice_drift_bps_15s": 7.0,
+                "short_return_bps_15s": 7.0,
+                "microprice_drift_bps_30s": 8.0,
+                "short_return_bps_30s": 8.0,
+                "cvd_base_1s_z": 1.8,
+                "queue_imbalance": 0.996,
+            },
+            regime=RegimeLabel(volatility="low", spread="tight", trend="trend_up", flow="high"),
+            spread_bps=1.0,
+            mid_price=100.0,
+            microprice=100.0,
+        )
+        market_decision = StrategyDecision(
+            symbol="BTCUSDT",
+            side=1,
+            target_qty=1.0,
+            reason="continuation_long",
+            confidence=0.8,
+            order_type="market",
+        )
+        limit_decision = StrategyDecision(
+            symbol="BTCUSDT",
+            side=1,
+            target_qty=1.0,
+            reason="continuation_long",
+            confidence=0.8,
+            order_type="limit",
+        )
+
+        market_context, _ = engine._prepare_entry_context(
+            snapshot=snapshot,
+            decision=market_decision,
+            strategy_name="continuation",
+        )
+        limit_context, _ = engine._prepare_entry_context(
+            snapshot=snapshot,
+            decision=limit_decision,
+            strategy_name="continuation",
+        )
+    finally:
+        engine.close()
+
+    assert float(limit_context["roundtrip_cost_est_bps"]) < float(market_context["roundtrip_cost_est_bps"])
+    assert limit_context["entry_order_type"] == "limit"
+    assert market_context["entry_order_type"] == "market"
 
 
 def test_engine_resolves_entry_sizing_from_notional_bounds(tmp_path) -> None:

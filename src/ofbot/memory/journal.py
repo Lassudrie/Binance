@@ -7,6 +7,20 @@ from ofbot.execution.portfolio import TradeRecord
 from ofbot.memory.store import MemoryStore
 from ofbot.market.features import FeatureSnapshot
 
+COMPACT_FEATURE_KEYS = (
+    "queue_imbalance",
+    "cvd_base_1s",
+    "cvd_base_1s_z",
+    "microprice_drift_bps_1s",
+    "momentum_bps_1s",
+    "momentum_bps_5s",
+    "realized_volatility",
+    "regime_volatility",
+    "regime_spread",
+    "regime_trend",
+    "regime_flow",
+)
+
 
 @dataclass(slots=True)
 class RunContext:
@@ -48,7 +62,7 @@ class JournalWriter:
             params=payload,
             regime=str(snapshot.regime),
             order_intent=order_intent,
-            feature_snapshot=dict(snapshot.features),
+            feature_snapshot=_compact_feature_snapshot(snapshot),
             reason=rationale,
             vol_bucket=str(snapshot.features.get("regime_volatility", "")) if snapshot.features else None,
         )
@@ -78,7 +92,7 @@ class JournalWriter:
             params=None,
             regime=str(snapshot.regime),
             order_intent="fill",
-            feature_snapshot=dict(snapshot.features),
+            feature_snapshot=_compact_feature_snapshot(snapshot),
             fill_qty=fill_qty,
             fill_price=fill_price,
             spread_bps=spread_bps,
@@ -121,3 +135,21 @@ class JournalWriter:
             exit_notional=trade.exit_notional,
             closed_qty=trade.closed_qty,
         )
+
+
+def _compact_feature_snapshot(snapshot: FeatureSnapshot) -> dict[str, float | int | str | None]:
+    compact: dict[str, float | int | str | None] = {
+        "feature_count": len(snapshot.features),
+    }
+    if snapshot.spread_bps is not None:
+        compact["spread_bps"] = snapshot.spread_bps
+    if snapshot.mid_price is not None:
+        compact["mid_price"] = snapshot.mid_price
+    if snapshot.microprice is not None:
+        compact["microprice"] = snapshot.microprice
+    for key in COMPACT_FEATURE_KEYS:
+        value = snapshot.features.get(key)
+        if value is None:
+            continue
+        compact[key] = value
+    return compact

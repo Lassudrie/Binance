@@ -126,6 +126,88 @@ class MemoryStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_reviews (
+                id BIGINT PRIMARY KEY,
+                run_id VARCHAR UNIQUE,
+                verdict VARCHAR,
+                config_snapshot_path VARCHAR,
+                config_snapshot_hash VARCHAR,
+                raw_input_path VARCHAR,
+                report_dir VARCHAR,
+                summary JSON,
+                notes JSON,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lessons_learned (
+                id BIGINT PRIMARY KEY,
+                run_id VARCHAR,
+                lesson_key VARCHAR,
+                scope VARCHAR,
+                lesson_type VARCHAR,
+                strategy VARCHAR,
+                regime VARCHAR,
+                evidence JSON,
+                recommended_action JSON,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manual_notes (
+                id BIGINT PRIMARY KEY,
+                run_id VARCHAR,
+                note_scope VARCHAR,
+                trade_context_id BIGINT,
+                tag VARCHAR,
+                note_text VARCHAR,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_candidates (
+                id BIGINT PRIMARY KEY,
+                candidate_id VARCHAR UNIQUE,
+                source_run_id VARCHAR,
+                strategy VARCHAR,
+                archetype VARCHAR,
+                status VARCHAR,
+                base_config_hash VARCHAR,
+                overlay_yaml_path VARCHAR,
+                params JSON,
+                rationale JSON,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS candidate_validations (
+                id BIGINT PRIMARY KEY,
+                candidate_id VARCHAR,
+                validation_run_id VARCHAR,
+                baseline_net_pnl DOUBLE,
+                candidate_net_pnl DOUBLE,
+                baseline_trade_count INTEGER,
+                candidate_trade_count INTEGER,
+                baseline_max_drawdown DOUBLE,
+                candidate_max_drawdown DOUBLE,
+                verdict VARCHAR,
+                summary JSON,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+            """
+        )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
         existing = {
@@ -497,8 +579,269 @@ class MemoryStore:
             out[str(regime)] = (str(incumbent), str(challenger), float(mean_pnl))
         return out
 
-    def run_query_df(self, query: str) -> Any:
-        return self._conn.execute(query).fetch_df()
+    def upsert_run_review(
+        self,
+        *,
+        run_id: str,
+        verdict: str,
+        config_snapshot_path: str | None,
+        config_snapshot_hash: str | None,
+        raw_input_path: str | None,
+        report_dir: str | None,
+        summary: dict[str, Any] | None,
+        notes: dict[str, Any] | None = None,
+    ) -> None:
+        existing = self._conn.execute(
+            "SELECT COUNT(*) FROM run_reviews WHERE run_id=?",
+            [run_id],
+        ).fetchone()[0]
+        values = [
+            verdict,
+            config_snapshot_path,
+            config_snapshot_hash,
+            raw_input_path,
+            report_dir,
+            _dump_json(summary or {}),
+            _dump_json(notes or {}),
+            _to_naive_datetime(datetime.now(UTC)),
+            run_id,
+        ]
+        if existing:
+            self._conn.execute(
+                """
+                UPDATE run_reviews
+                SET verdict=?, config_snapshot_path=?, config_snapshot_hash=?, raw_input_path=?, report_dir=?, summary=?, notes=?, updated_at=?
+                WHERE run_id=?
+                """,
+                values,
+            )
+            return
+        self._conn.execute(
+            """
+            INSERT INTO run_reviews
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                self.next_id("run_reviews"),
+                run_id,
+                verdict,
+                config_snapshot_path,
+                config_snapshot_hash,
+                raw_input_path,
+                report_dir,
+                _dump_json(summary or {}),
+                _dump_json(notes or {}),
+                _to_naive_datetime(datetime.now(UTC)),
+            ],
+        )
+
+    def delete_lessons_for_run(self, run_id: str) -> None:
+        self._conn.execute("DELETE FROM lessons_learned WHERE run_id=?", [run_id])
+
+    def insert_lesson_learned(
+        self,
+        *,
+        run_id: str,
+        lesson_key: str,
+        scope: str,
+        lesson_type: str,
+        strategy: str | None,
+        regime: str | None,
+        evidence: dict[str, Any] | None,
+        recommended_action: dict[str, Any] | None,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO lessons_learned
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                self.next_id("lessons_learned"),
+                run_id,
+                lesson_key,
+                scope,
+                lesson_type,
+                strategy,
+                regime,
+                _dump_json(evidence or {}),
+                _dump_json(recommended_action or {}),
+                _to_naive_datetime(datetime.now(UTC)),
+            ],
+        )
+
+    def insert_manual_note(
+        self,
+        *,
+        run_id: str,
+        note_scope: str,
+        tag: str,
+        note_text: str,
+        trade_context_id: int | None = None,
+    ) -> int:
+        note_id = self.next_id("manual_notes")
+        self._conn.execute(
+            """
+            INSERT INTO manual_notes
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            [
+                note_id,
+                run_id,
+                note_scope,
+                trade_context_id,
+                tag,
+                note_text,
+                _to_naive_datetime(datetime.now(UTC)),
+            ],
+        )
+        return note_id
+
+    def get_trade_context(self, trade_context_id: int) -> tuple[Any, ...] | None:
+        row = self._conn.execute(
+            "SELECT * FROM trade_contexts WHERE id=?",
+            [trade_context_id],
+        ).fetchone()
+        return tuple(row) if row is not None else None
+
+    def upsert_learning_candidate(
+        self,
+        *,
+        candidate_id: str,
+        source_run_id: str,
+        strategy: str,
+        archetype: str,
+        status: str,
+        base_config_hash: str | None,
+        overlay_yaml_path: str,
+        params: dict[str, Any] | None,
+        rationale: dict[str, Any] | None,
+    ) -> None:
+        existing = self._conn.execute(
+            "SELECT COUNT(*) FROM learning_candidates WHERE candidate_id=?",
+            [candidate_id],
+        ).fetchone()[0]
+        now = _to_naive_datetime(datetime.now(UTC))
+        if existing:
+            self._conn.execute(
+                """
+                UPDATE learning_candidates
+                SET source_run_id=?, strategy=?, archetype=?, status=?, base_config_hash=?, overlay_yaml_path=?, params=?, rationale=?, updated_at=?
+                WHERE candidate_id=?
+                """,
+                [
+                    source_run_id,
+                    strategy,
+                    archetype,
+                    status,
+                    base_config_hash,
+                    overlay_yaml_path,
+                    _dump_json(params or {}),
+                    _dump_json(rationale or {}),
+                    now,
+                    candidate_id,
+                ],
+            )
+            return
+        self._conn.execute(
+            """
+            INSERT INTO learning_candidates
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                self.next_id("learning_candidates"),
+                candidate_id,
+                source_run_id,
+                strategy,
+                archetype,
+                status,
+                base_config_hash,
+                overlay_yaml_path,
+                _dump_json(params or {}),
+                _dump_json(rationale or {}),
+                now,
+                now,
+            ],
+        )
+
+    def update_learning_candidate_status(self, candidate_id: str, status: str) -> None:
+        self._conn.execute(
+            """
+            UPDATE learning_candidates
+            SET status=?, updated_at=?
+            WHERE candidate_id=?
+            """,
+            [status, _to_naive_datetime(datetime.now(UTC)), candidate_id],
+        )
+
+    def upsert_candidate_validation(
+        self,
+        *,
+        candidate_id: str,
+        validation_run_id: str,
+        baseline_net_pnl: float,
+        candidate_net_pnl: float,
+        baseline_trade_count: int,
+        candidate_trade_count: int,
+        baseline_max_drawdown: float,
+        candidate_max_drawdown: float,
+        verdict: str,
+        summary: dict[str, Any] | None,
+    ) -> None:
+        existing = self._conn.execute(
+            """
+            SELECT COUNT(*) FROM candidate_validations
+            WHERE candidate_id=? AND validation_run_id=?
+            """,
+            [candidate_id, validation_run_id],
+        ).fetchone()[0]
+        now = _to_naive_datetime(datetime.now(UTC))
+        values = [
+            baseline_net_pnl,
+            candidate_net_pnl,
+            baseline_trade_count,
+            candidate_trade_count,
+            baseline_max_drawdown,
+            candidate_max_drawdown,
+            verdict,
+            _dump_json(summary or {}),
+            now,
+            candidate_id,
+            validation_run_id,
+        ]
+        if existing:
+            self._conn.execute(
+                """
+                UPDATE candidate_validations
+                SET baseline_net_pnl=?, candidate_net_pnl=?, baseline_trade_count=?, candidate_trade_count=?, baseline_max_drawdown=?, candidate_max_drawdown=?, verdict=?, summary=?, updated_at=?
+                WHERE candidate_id=? AND validation_run_id=?
+                """,
+                values,
+            )
+            return
+        self._conn.execute(
+            """
+            INSERT INTO candidate_validations
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                self.next_id("candidate_validations"),
+                candidate_id,
+                validation_run_id,
+                baseline_net_pnl,
+                candidate_net_pnl,
+                baseline_trade_count,
+                candidate_trade_count,
+                baseline_max_drawdown,
+                candidate_max_drawdown,
+                verdict,
+                _dump_json(summary or {}),
+                now,
+                now,
+            ],
+        )
+
+    def run_query_df(self, query: str, params: list[Any] | None = None) -> Any:
+        return self._conn.execute(query, params or []).fetch_df()
 
 
 def _dump_json(payload: dict[str, Any] | None) -> str:

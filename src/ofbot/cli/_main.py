@@ -13,7 +13,9 @@ from ofbot.engine import PaperEngine
 from ofbot.gateway.binance_public_rest import BinancePublicRestClient
 from ofbot.gateway.binance_public_ws import BinancePublicWebSocket
 from ofbot.logging import configure_logging
-from ofbot.memory.reports import build_daily_report
+from ofbot.maintenance import cleanup_runtime_artifacts, write_live_learning_status
+from ofbot.memory import learning as learning_mod
+from ofbot.memory.reports import build_daily_report, build_run_report
 from ofbot.memory.store import MemoryStore
 from ofbot.replay.eval import run_replay
 from ofbot.utils.manual_orders import write_manual_order_request
@@ -46,6 +48,45 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REPORT_DATE,
         help="YYYY-MM-DD or 'today' (default: today)",
     )
+
+    learn = subs.add_parser("learn", help="advance the learning loop for a completed run")
+    learn_subs = learn.add_subparsers(dest="learn_command", required=True)
+    learn_advance = learn_subs.add_parser("advance", help="build lessons, validations and candidate overlays")
+    learn_advance.add_argument("--config", default=DEFAULT_LOCAL_CONFIG)
+    learn_advance.add_argument("--run-id", required=True)
+    learn_advance.add_argument("--input", required=True, help="path to raw replay parquet for OOS validation")
+
+    journal = subs.add_parser("journal", help="attach manual notes to the learning journal")
+    journal_subs = journal.add_subparsers(dest="journal_command", required=True)
+
+    note_run = journal_subs.add_parser("note-run", help="append a manual run-level note")
+    note_run.add_argument("--config", default=DEFAULT_LOCAL_CONFIG)
+    note_run.add_argument("--run-id", required=True)
+    note_run.add_argument("--tag", required=True)
+    note_run.add_argument("--note", required=True)
+
+    note_trade = journal_subs.add_parser("note-trade", help="append a manual trade-level note")
+    note_trade.add_argument("--config", default=DEFAULT_LOCAL_CONFIG)
+    note_trade.add_argument("--run-id", required=True)
+    note_trade.add_argument("--trade-id", type=int, required=True)
+    note_trade.add_argument("--tag", required=True)
+    note_trade.add_argument("--note", required=True)
+
+    ops = subs.add_parser("ops", help="runtime cleanup and status helpers")
+    ops_subs = ops.add_subparsers(dest="ops_command", required=True)
+
+    cleanup = ops_subs.add_parser("cleanup", help="prune runtime artifacts to protect disk space")
+    cleanup.add_argument("--config", default=DEFAULT_LOCAL_CONFIG)
+    cleanup.add_argument("--dry-run", action="store_true")
+    cleanup.add_argument(
+        "--aggressive-historical",
+        action="store_true",
+        help="also delete historical bronze/silver/raw spot caches",
+    )
+
+    status_md = ops_subs.add_parser("status-md", help="write a synthetic live-learning markdown status")
+    status_md.add_argument("--config", default=DEFAULT_LOCAL_CONFIG)
+    status_md.add_argument("--output", help="output markdown path")
 
     paper_order = subs.add_parser("paper-order", help="enqueue a manual paper-only order for a live session")
     paper_order.add_argument("--config", default=DEFAULT_LOCAL_CONFIG)
@@ -84,7 +125,7 @@ async def _run_live(config_path: str, max_events: int, max_seconds: int, symbols
     async def _consume_events() -> None:
         nonlocal processed
         async for event in ws.events():
-            client.process_event(event.event)
+            client.process_event(event.event, received_at=event.received_at)
             processed += 1
             if max_events > 0 and processed >= max_events:
                 break
@@ -123,6 +164,131 @@ def _run_report(config_path: str, date_value: str) -> None:
         store.close()
     console.rule("ofbot daily report")
     console.print(f"report: {report_path}")
+
+
+def _run_learn_advance(config_path: str, *, run_id: str, input_path: str) -> None:
+    config = load_config(config_path)
+    store = MemoryStore(config.learning.duckdb_path)
+    try:
+        report_path = build_run_report(store, run_id, config.paths.reports_dir / run_id)
+        overview_path = learning_mod.advance_learning_cycle(
+            store=store,
+            config=config,
+            run_id=run_id,
+            raw_input_path=Path(input_path),
+            report_dir=report_path.parent,
+        )
+        status_path = write_live_learning_status(config=config, store=store)
+    finally:
+        store.close()
+    console.rule("ofbot learning advance")
+    console.print(f"overview: {overview_path}")
+    console.print(f"status: {status_path}")
+
+
+def _run_note_run(config_path: str, *, run_id: str, tag: str, note: str) -> None:
+    config = load_config(config_path)
+    store = MemoryStore(config.learning.duckdb_path)
+    try:
+        store.insert_manual_note(
+            run_id=run_id,
+            note_scope="run",
+            tag=tag,
+            note_text=note,
+        )
+        overview_path = _refresh_learning_after_note(store=store, config=config, run_id=run_id)
+        status_path = write_live_learning_status(config=config, store=store)
+    finally:
+        store.close()
+    console.rule("ofbot run note")
+    console.print(f"overview: {overview_path}")
+    console.print(f"status: {status_path}")
+
+
+def _run_note_trade(config_path: str, *, run_id: str, trade_id: int, tag: str, note: str) -> None:
+    config = load_config(config_path)
+    store = MemoryStore(config.learning.duckdb_path)
+    try:
+        trade = store.get_trade_context(trade_id)
+        if trade is None:
+            raise SystemExit(f"trade_context id={trade_id} not found")
+        if str(trade[1]) != run_id:
+            raise SystemExit(f"trade_context id={trade_id} belongs to run_id={trade[1]}")
+        store.insert_manual_note(
+            run_id=run_id,
+            note_scope="trade",
+            trade_context_id=trade_id,
+            tag=tag,
+            note_text=note,
+        )
+        overview_path = _refresh_learning_after_note(store=store, config=config, run_id=run_id)
+        status_path = write_live_learning_status(config=config, store=store)
+    finally:
+        store.close()
+    console.rule("ofbot trade note")
+    console.print(f"overview: {overview_path}")
+    console.print(f"status: {status_path}")
+
+
+def _run_ops_cleanup(
+    config_path: str,
+    *,
+    dry_run: bool,
+    aggressive_historical: bool,
+) -> None:
+    config = load_config(config_path)
+    store = MemoryStore(config.learning.duckdb_path)
+    try:
+        summary = cleanup_runtime_artifacts(
+            config=config,
+            store=store,
+            dry_run=dry_run,
+            aggressive_historical=aggressive_historical,
+        )
+        status_path = write_live_learning_status(config=config, store=store)
+    finally:
+        store.close()
+    console.rule("ofbot cleanup")
+    console.print(f"freed: {summary['freed_human']}")
+    console.print(f"raw_removed: {len(summary['removed_raw_files'])}")
+    console.print(f"report_csv_removed: {len(summary['removed_report_csvs'])}")
+    console.print(f"status: {status_path}")
+
+
+def _run_ops_status_md(config_path: str, *, output: str | None) -> None:
+    config = load_config(config_path)
+    store = MemoryStore(config.learning.duckdb_path)
+    try:
+        output_path = Path(output) if output else None
+        status_path = write_live_learning_status(
+            config=config,
+            store=store,
+            output_path=output_path,
+        )
+    finally:
+        store.close()
+    console.rule("ofbot status")
+    console.print(f"status: {status_path}")
+
+
+def _refresh_learning_after_note(*, store: MemoryStore, config, run_id: str) -> Path:
+    review = learning_mod.get_run_review(store, run_id)
+    if review is None:
+        report_path = build_run_report(store, run_id, config.paths.reports_dir / run_id)
+        return learning_mod.advance_learning_cycle(
+            store=store,
+            config=config,
+            run_id=run_id,
+            raw_input_path=None,
+            report_dir=report_path.parent,
+            validate_pending=False,
+            generate_candidates=False,
+        )
+    return learning_mod.refresh_learning_artifacts(
+        store=store,
+        config=config,
+        run_id=run_id,
+    )
 
 
 def _run_paper_order(
@@ -172,6 +338,23 @@ def main() -> None:
         if date_value == "today":
             date_value = datetime.now(UTC).date().isoformat()
         _run_report(args.config, date_value)
+    elif args.command == "learn":
+        if args.learn_command == "advance":
+            _run_learn_advance(args.config, run_id=args.run_id, input_path=args.input)
+    elif args.command == "journal":
+        if args.journal_command == "note-run":
+            _run_note_run(args.config, run_id=args.run_id, tag=args.tag, note=args.note)
+        elif args.journal_command == "note-trade":
+            _run_note_trade(args.config, run_id=args.run_id, trade_id=args.trade_id, tag=args.tag, note=args.note)
+    elif args.command == "ops":
+        if args.ops_command == "cleanup":
+            _run_ops_cleanup(
+                args.config,
+                dry_run=args.dry_run,
+                aggressive_historical=args.aggressive_historical,
+            )
+        elif args.ops_command == "status-md":
+            _run_ops_status_md(args.config, output=args.output)
     elif args.command == "paper-order":
         _run_paper_order(
             args.config,

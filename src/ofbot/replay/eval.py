@@ -13,6 +13,6 @@ def run_replay(config: AppConfig, input_path: Path) -> Path:
         events = iter_replay_events(input_path)
         for event in events:
             engine.process_event(event)
-        return engine.finalize()
+        return engine.finalize(raw_input_path=input_path)
     finally:
         engine.close()

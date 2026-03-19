@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ofbot.config import AppConfig
-from ofbot.execution.costs import estimate_market_order_cost
+from ofbot.execution.costs import estimate_market_order_cost, estimate_order_cost
 from ofbot.execution.paper_broker import PaperBroker
 from ofbot.execution.portfolio import PaperPortfolio, PositionSnapshot, TradeRecord
 from ofbot.execution.risk import RiskManager
 from ofbot.gateway.binance_public_rest import BinancePublicRestClient
 from ofbot.gateway.recorder import ParquetRecorder
 from ofbot.logging import get_logger
+from ofbot.maintenance import cleanup_runtime_artifacts, write_live_learning_status
 from ofbot.market.features import FeatureEngine, FeatureSnapshot
 from ofbot.market.orderbook import OrderBookState
 from ofbot.market.regimes import RegimeLabel
@@ -25,6 +26,7 @@ from ofbot.market.trades import (
     KlineEvent,
     MarketEvent,
 )
+from ofbot.memory import learning as learning_mod
 from ofbot.memory import reports as report_mod
 from ofbot.memory.bandit import ThompsonPolicySelector
 from ofbot.memory.journal import JournalWriter
@@ -163,7 +165,7 @@ class PaperEngine:
         for event in events:
             self.process_event(event)
 
-    def process_event(self, event: MarketEvent) -> None:
+    def process_event(self, event: MarketEvent, *, received_at: datetime | None = None) -> None:
         if self._closed:
             return
 
@@ -174,10 +176,10 @@ class PaperEngine:
         self._live_counters["processed_events"] += 1
         self._event_type_counts[event.event_type] += 1
         try:
-            processing_time = self._runtime_now(event.event_time)
+            processing_time = self._runtime_now(received_at or event.event_time)
             self.last_event_time = event.event_time
             self._last_ws_event_time[symbol] = processing_time
-            self._record_raw_event(event)
+            self._record_raw_event(event, received_at=received_at)
 
             book = self.order_books[symbol]
             if isinstance(event, AggTradeEvent):
@@ -474,14 +476,15 @@ class PaperEngine:
         projected_qty: float,
         now: datetime,
     ) -> str | None:
-        ws_healthy = self._is_ws_healthy(snapshot.symbol, snapshot.event_time)
+        ws_healthy = self._is_ws_healthy(snapshot.symbol, now)
         projected_notional = abs(snapshot.mid_price or 0.0) * abs(projected_qty)
+        freshness_timestamp = self._freshness_timestamp(snapshot.event_time, now=now)
         allowed, reason = self.risk.pre_entry_gate(
             symbol=snapshot.symbol,
             snapshot=snapshot,
             portfolio_snapshot=state,
             now=now,
-            event_timestamp=snapshot.event_time,
+            event_timestamp=freshness_timestamp,
             websocket_healthy=ws_healthy,
             open_positions=len(self.portfolio.open_symbols),
             total_equity=self.portfolio.equity,
@@ -500,6 +503,7 @@ class PaperEngine:
         strategy_name: str,
     ) -> tuple[dict[str, float | int | str | bool | None], str | None]:
         side = 1 if getattr(decision, "side", 0) > 0 else -1
+        order_type = str(getattr(decision, "order_type", "market") or "market").lower()
         strategy = self.strategies.get(strategy_name)
         params = strategy.get_parameters() if strategy is not None else {}
         min_expected_net_edge_bps = float(params.get("min_expected_net_edge_bps", 0.0) or 0.0)
@@ -509,11 +513,12 @@ class PaperEngine:
 
         seed_notional = self.config.execution.default_target_notional_usd
         seed_qty = max(seed_notional / mid_price, EPSILON)
-        seed_cost_estimate = estimate_market_order_cost(
+        seed_cost_estimate = estimate_order_cost(
             self.config.execution,
             book=self.order_books.get(snapshot.symbol),
             side=side,
             requested_qty=seed_qty,
+            order_type=order_type,
         )
         move_components = self._expected_move_proxy_components(
             snapshot,
@@ -532,14 +537,16 @@ class PaperEngine:
             self.config.execution.max_target_notional_usd,
         )
         resolved_target_qty = desired_notional_usd / mid_price
-        cost_estimate = estimate_market_order_cost(
+        cost_estimate = estimate_order_cost(
             self.config.execution,
             book=self.order_books.get(snapshot.symbol),
             side=side,
             requested_qty=resolved_target_qty,
+            order_type=order_type,
         )
         expected_net_edge_bps = expected_move_proxy_bps - cost_estimate.roundtrip_cost_bps
         entry_context: dict[str, float | int | str | bool | None] = {
+            "entry_order_type": order_type,
             "expected_move_proxy_bps": expected_move_proxy_bps,
             "roundtrip_cost_est_bps": cost_estimate.roundtrip_cost_bps,
             "estimated_entry_cost_bps": cost_estimate.one_way_cost_bps,
@@ -786,9 +793,14 @@ class PaperEngine:
             return False
         return (now - last).total_seconds() <= self.config.risk.broken_ws_s
 
-    def _record_raw_event(self, event: MarketEvent) -> None:
+    def _freshness_timestamp(self, market_time: datetime, *, now: datetime) -> datetime:
+        if self._runtime_clock == "event":
+            return market_time
+        return now
+
+    def _record_raw_event(self, event: MarketEvent, *, received_at: datetime | None = None) -> None:
         if self._recorder is not None:
-            self._recorder.record(event, received_at=event.event_time)
+            self._recorder.record(event, received_at=received_at or event.event_time)
 
     def _sync_depth_book(self, *, symbol: str, event_time: datetime, trigger_reason: str | None) -> bool:
         if self._depth_snapshot_client is None:
@@ -886,7 +898,7 @@ class PaperEngine:
             output_root=output_root,
         )
 
-    def finalize(self) -> Path | None:
+    def finalize(self, *, raw_input_path: Path | None = None) -> Path | None:
         if self._final_report_path is not None:
             return self._final_report_path
 
@@ -894,6 +906,25 @@ class PaperEngine:
         self._flush_raw()
         reports_dir = self.config.paths.reports_dir / self.run_id
         self._final_report_path = self.flush_reports(reports_dir)
+        learning_input_path = raw_input_path
+        if learning_input_path is None and self._raw_flushed and self._recorder is not None:
+            candidate_raw_path = self.config.paths.raw_dir / f"raw_{self.journal.run_id}.parquet"
+            if candidate_raw_path.exists():
+                learning_input_path = candidate_raw_path
+        if self._final_report_path is not None:
+            learning_mod.advance_learning_cycle(
+                store=self.store,
+                config=self.config,
+                run_id=self.run_id,
+                raw_input_path=learning_input_path,
+                report_dir=self._final_report_path.parent,
+            )
+            if self.config.housekeeping.enabled:
+                try:
+                    cleanup_runtime_artifacts(config=self.config, store=self.store)
+                    write_live_learning_status(config=self.config, store=self.store)
+                except Exception as exc:
+                    self.logger.warning("housekeeping_failed run_id=%s error=%s", self.run_id, exc)
         self.close()
         return self._final_report_path
 

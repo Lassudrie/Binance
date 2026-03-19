@@ -25,9 +25,11 @@ class _FakeEngine:
         self.processed = 0
         self.finalized = False
         self.closed = False
+        self.received_at = None
 
-    def process_event(self, event) -> None:
+    def process_event(self, event, *, received_at=None) -> None:
         self.processed += 1
+        self.received_at = received_at
 
     def finalize(self) -> Path:
         self.finalized = True

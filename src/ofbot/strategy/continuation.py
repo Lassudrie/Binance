@@ -50,6 +50,7 @@ class ContinuationStrategy(Strategy):
         stop_loss_bps: float = 70.0,
         take_profit_bps: float = 150.0,
         trailing_stop_bps: float = 35.0,
+        order_type: str = "market",
     ) -> None:
         super().__init__("continuation")
         self.trend_alignment_threshold = trend_alignment_threshold
@@ -76,6 +77,7 @@ class ContinuationStrategy(Strategy):
         self.stop_loss_bps = stop_loss_bps
         self.take_profit_bps = take_profit_bps
         self.trailing_stop_bps = trailing_stop_bps
+        self.order_type = order_type if order_type in {"market", "limit"} else "market"
 
     def decide(
         self,
@@ -154,7 +156,7 @@ class ContinuationStrategy(Strategy):
                     target_qty=1.0,
                     reason="continuation_long",
                     confidence=min(1.0, abs(cvd_z) / 3.0),
-                    order_type="market",
+                    order_type=self.order_type,
                     max_holding_time_s=self.max_holding_time_s,
                     stop_loss_bps=self.stop_loss_bps,
                     take_profit_bps=self.take_profit_bps,
@@ -182,7 +184,7 @@ class ContinuationStrategy(Strategy):
                     target_qty=1.0,
                     reason="continuation_flow",
                     confidence=min(1.0, abs(cvd_z) / 3.0),
-                    order_type="market",
+                    order_type=self.order_type,
                     max_holding_time_s=self.max_holding_time_s,
                     stop_loss_bps=self.stop_loss_bps,
                     take_profit_bps=self.take_profit_bps,
@@ -197,7 +199,7 @@ class ContinuationStrategy(Strategy):
                 target_qty=1.0,
                 reason="continuation_flow",
                 confidence=min(1.0, abs(cvd_z) / 3.0),
-                order_type="market",
+                order_type=self.order_type,
                 max_holding_time_s=self.max_holding_time_s,
                 stop_loss_bps=self.stop_loss_bps,
                 take_profit_bps=self.take_profit_bps,
@@ -270,4 +272,5 @@ class ContinuationStrategy(Strategy):
             "stop_loss_bps": self.stop_loss_bps,
             "take_profit_bps": self.take_profit_bps,
             "trailing_stop_bps": self.trailing_stop_bps,
+            "order_type": self.order_type,
         }

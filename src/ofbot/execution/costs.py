@@ -148,6 +148,63 @@ def estimate_market_order_cost(
     )
 
 
+def estimate_limit_order_cost(
+    execution: ExecutionConfig,
+    *,
+    book: OrderBookState | None,
+    side: int,
+    requested_qty: float,
+) -> MarketCostEstimate:
+    safe_qty = max(float(requested_qty), 0.0)
+    spread_bps = execution.base_spread_bps
+    if book is not None and book.spread_bps is not None:
+        spread_bps = float(book.spread_bps)
+    fee_bps = float(execution.maker_fee_bps)
+    slippage_bps = float(execution.fallback_half_spread_bps)
+    one_way_cost_bps = fee_bps + slippage_bps
+    top_of_book_qty = 0.0
+    if book is not None:
+        top_of_book_qty = float(book.ask_qty or 0.0) if side > 0 else float(book.bid_qty or 0.0)
+    participation_rate = min(1.0, safe_qty / max(top_of_book_qty, safe_qty, EPSILON)) if safe_qty > EPSILON else 0.0
+    return MarketCostEstimate(
+        requested_qty=safe_qty,
+        top_of_book_qty=max(top_of_book_qty, 0.0),
+        visible_depth_qty=max(top_of_book_qty, 0.0),
+        participation_rate=participation_rate,
+        spread_bps=spread_bps,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        one_way_cost_bps=one_way_cost_bps,
+        roundtrip_cost_bps=2.0 * one_way_cost_bps,
+        fill_price=None,
+        used_synthetic_liquidity=False,
+    )
+
+
+def estimate_order_cost(
+    execution: ExecutionConfig,
+    *,
+    book: OrderBookState | None,
+    side: int,
+    requested_qty: float,
+    order_type: str,
+) -> MarketCostEstimate:
+    resolved_order_type = order_type.lower()
+    if resolved_order_type == "limit" and execution.allow_limit_orders:
+        return estimate_limit_order_cost(
+            execution,
+            book=book,
+            side=side,
+            requested_qty=requested_qty,
+        )
+    return estimate_market_order_cost(
+        execution,
+        book=book,
+        side=side,
+        requested_qty=requested_qty,
+    )
+
+
 def _sweep_fill_price(
     execution: ExecutionConfig,
     *,

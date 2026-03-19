@@ -34,6 +34,7 @@ class ExhaustionFadeStrategy(Strategy):
         trailing_stop_bps: float = 30.0,
         no_trade_z: float = 0.6,
         min_burst_z: float = 1.0,
+        order_type: str = "market",
     ) -> None:
         super().__init__("exhaustion")
         self.burst_threshold = burst_threshold
@@ -47,6 +48,7 @@ class ExhaustionFadeStrategy(Strategy):
         self.trailing_stop_bps = trailing_stop_bps
         self.no_trade_z = no_trade_z
         self.min_burst_z = min_burst_z
+        self.order_type = order_type if order_type in {"market", "limit"} else "market"
 
     def decide(
         self,
@@ -120,7 +122,7 @@ class ExhaustionFadeStrategy(Strategy):
                     target_qty=1.0,
                     reason="exhaustion_fade",
                     confidence=min(1.0, burst_z / 3.0),
-                    order_type="market",
+                    order_type=self.order_type,
                     max_holding_time_s=self.max_holding_time_s,
                     stop_loss_bps=self.stop_loss_bps,
                     take_profit_bps=self.take_profit_bps,
@@ -166,4 +168,5 @@ class ExhaustionFadeStrategy(Strategy):
             "trailing_stop_bps": self.trailing_stop_bps,
             "no_trade_z": self.no_trade_z,
             "min_burst_z": self.min_burst_z,
+            "order_type": self.order_type,
         }

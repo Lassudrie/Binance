@@ -30,6 +30,7 @@ class RegimeAwareHybridStrategy(Strategy):
         stop_loss_bps: float = 65.0,
         take_profit_bps: float = 120.0,
         trailing_stop_bps: float = 28.0,
+        order_type: str = "market",
     ) -> None:
         super().__init__("hybrid")
         self.regime_confidence_threshold = regime_confidence_threshold
@@ -41,6 +42,7 @@ class RegimeAwareHybridStrategy(Strategy):
         self.stop_loss_bps = stop_loss_bps
         self.take_profit_bps = take_profit_bps
         self.trailing_stop_bps = trailing_stop_bps
+        self.order_type = order_type if order_type in {"market", "limit"} else "market"
         self.continuation = ContinuationStrategy(
             spread_bps_max=spread_bps_max,
             volatility_bps_max=volatility_bps_max,
@@ -48,6 +50,7 @@ class RegimeAwareHybridStrategy(Strategy):
             stop_loss_bps=stop_loss_bps,
             take_profit_bps=take_profit_bps,
             trailing_stop_bps=trailing_stop_bps,
+            order_type=self.order_type,
         )
         self.exhaustion = ExhaustionFadeStrategy(
             spread_bps_max=spread_bps_max,
@@ -56,6 +59,7 @@ class RegimeAwareHybridStrategy(Strategy):
             stop_loss_bps=stop_loss_bps,
             take_profit_bps=take_profit_bps,
             trailing_stop_bps=trailing_stop_bps,
+            order_type=self.order_type,
         )
 
     def decide(
@@ -146,4 +150,5 @@ class RegimeAwareHybridStrategy(Strategy):
             "stop_loss_bps": self.stop_loss_bps,
             "take_profit_bps": self.take_profit_bps,
             "trailing_stop_bps": self.trailing_stop_bps,
+            "order_type": self.order_type,
         }

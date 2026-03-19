@@ -110,6 +110,15 @@ class LearningConfig(BaseModel):
     enable_promotion: bool = True
 
 
+class HousekeepingConfig(BaseModel):
+    enabled: bool = True
+    keep_recent_run_raw: int = 12
+    keep_recent_report_csv: int = 8
+    preserve_pending_candidate_sources: bool = True
+    remove_tmp_pytest: bool = True
+    status_markdown_path: Path = Path("docs/live_learning_status.md")
+
+
 class AppConfig(BaseModel):
     mode: Literal["paper_local", "paper_testnet"] = "paper_local"
     symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT"])
@@ -124,6 +133,7 @@ class AppConfig(BaseModel):
     risk: RiskKillSwitchConfig = Field(default_factory=RiskKillSwitchConfig)
     strategy_library: PolicyLibraryConfig = Field(default_factory=PolicyLibraryConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)
+    housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
     paper_local_record_raw: bool = True
     seed: int = 42
     report_time: str = "today"
@@ -148,6 +158,7 @@ class AppConfig(BaseModel):
             memory_dir=self._resolve_path(root, self.paths.memory_dir),
         )
         self.learning.duckdb_path = self._resolve_path(root, self.learning.duckdb_path)
+        self.housekeeping.status_markdown_path = self._resolve_path(root, self.housekeeping.status_markdown_path)
         return self
 
     @staticmethod
@@ -193,6 +204,7 @@ def load_config(path: str | Path, *, repo_root: Path | None = None) -> AppConfig
         risk=RiskKillSwitchConfig(**data.get("risk", {})),
         strategy_library=PolicyLibraryConfig(**data.get("strategy_library", {})),
         learning=LearningConfig(**data.get("learning", {})),
+        housekeeping=HousekeepingConfig(**data.get("housekeeping", {})),
         paper_local_record_raw=bool(data.get("paper_local_record_raw", True)),
         seed=int(data.get("seed", data.get("universe_seed", 42))),
         report_time=str(data.get("report_time", "today")),
@@ -201,3 +213,8 @@ def load_config(path: str | Path, *, repo_root: Path | None = None) -> AppConfig
         ),
     )
     return resolved.resolve(base)
+
+
+def dump_config_yaml(config: AppConfig) -> str:
+    payload = config.model_dump(mode="json")
+    return yaml.safe_dump(payload, sort_keys=False)
