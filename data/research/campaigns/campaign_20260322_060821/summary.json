@@ -1,0 +1,18 @@
+{
+  "active_candidate_id": null,
+  "active_paper_config_path": "/home/alex/projects/Binance/data/research/deployments/active.paper.yaml",
+  "base_config_path": "config/local.paper.yaml",
+  "campaign_dir": "/home/alex/projects/Binance/data/research/campaigns/campaign_20260322_060821",
+  "campaign_id": "campaign_20260322_060821",
+  "ended_at": "2026-03-22T06:10:25.399397+00:00",
+  "last_report_path": "/home/alex/projects/Binance/reports/run_20260322_060823/report_run_20260322_060823/report.md",
+  "last_run_id": "run_20260322_060823",
+  "research_config_path": "config/research.continuation.campaign.yaml",
+  "session_seconds": 20,
+  "sessions_completed": 1,
+  "sessions_requested": 1,
+  "started_at": "2026-03-22T06:08:21.897868+00:00",
+  "status": "completed",
+  "symbols": [],
+  "updated_at": "2026-03-22T06:10:25.399222+00:00"
+}

@@ -291,12 +291,14 @@ class DeltaImpulseContinuationV1Strategy(Strategy):
         entry_z: float = 1.0,
         exit_z: float = 0.25,
         vol_regime_min: float = 1.0,
+        allowed_sessions: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self.source = source
         self.entry_z = entry_z
         self.exit_z = exit_z
         self.vol_regime_min = vol_regime_min
+        self.allowed_sessions = tuple(allowed_sessions or ())
 
     def generate_signal(self, event: BarEvent, state: PortfolioState) -> SignalEvent | None:
         feature_name = "quote_delta_rz" if self.source == "quote_delta_rz" else "delta_rz"
@@ -310,6 +312,8 @@ class DeltaImpulseContinuationV1Strategy(Strategy):
             return None
         if not _vol_filter_passed(event, self.vol_regime_min):
             return None
+        if not _session_filter_passed(event, self.allowed_sessions):
+            return None
         return _update_signal_context(
             _signal_if_changed(self, event, 1, "delta_impulse_continuation_v1_long"),
             {
@@ -317,6 +321,9 @@ class DeltaImpulseContinuationV1Strategy(Strategy):
                 "signal_feature": feature_name,
                 "signal_value": impulse,
                 "vol_regime_min": self.vol_regime_min,
+                "allowed_sessions": (
+                    ",".join(self.allowed_sessions) if self.allowed_sessions else "all"
+                ),
             },
         )
 
@@ -329,6 +336,7 @@ class DeltaImpulseContinuationV1Strategy(Strategy):
             "entry_z": self.entry_z,
             "exit_z": self.exit_z,
             "vol_regime_min": self.vol_regime_min,
+            "allowed_sessions": list(self.allowed_sessions),
         }
 
 
@@ -339,12 +347,14 @@ class ImbalanceBurstExhaustionV1Strategy(Strategy):
         burst_z: float = 1.0,
         exit_z: float = 0.25,
         vol_regime_min: float = 1.0,
+        allowed_sessions: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self.imbalance_z = imbalance_z
         self.burst_z = burst_z
         self.exit_z = exit_z
         self.vol_regime_min = vol_regime_min
+        self.allowed_sessions = tuple(allowed_sessions or ())
 
     def generate_signal(self, event: BarEvent, state: PortfolioState) -> SignalEvent | None:
         imbalance = _first_feature_float(
@@ -361,6 +371,8 @@ class ImbalanceBurstExhaustionV1Strategy(Strategy):
             return None
         if not _vol_filter_passed(event, self.vol_regime_min):
             return None
+        if not _session_filter_passed(event, self.allowed_sessions):
+            return None
         return _update_signal_context(
             _signal_if_changed(self, event, 1, "imbalance_burst_exhaustion_v1_long"),
             {
@@ -370,6 +382,9 @@ class ImbalanceBurstExhaustionV1Strategy(Strategy):
                 "burst_feature": "burst_intensity_rz",
                 "burst_value": burst,
                 "vol_regime_min": self.vol_regime_min,
+                "allowed_sessions": (
+                    ",".join(self.allowed_sessions) if self.allowed_sessions else "all"
+                ),
             },
         )
 
@@ -382,6 +397,7 @@ class ImbalanceBurstExhaustionV1Strategy(Strategy):
             "burst_z": self.burst_z,
             "exit_z": self.exit_z,
             "vol_regime_min": self.vol_regime_min,
+            "allowed_sessions": list(self.allowed_sessions),
         }
 
 

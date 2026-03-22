@@ -82,6 +82,44 @@ Build daily report:
 uv run python -m ofbot.cli report --date today --config config/local.paper.yaml
 ```
 
+Continuous alpha hunt without bridging offline research directly into runtime:
+
+```bash
+uv run python -m ofbot.cli alpha-loop run \
+  --config config/local.paper.yaml \
+  --suite-config configs/order_flow_suite_spot_hunt.toml \
+  --deep-dive-config configs/candidate_order_flow_hunt.toml \
+  --live-run-seconds 120
+```
+
+Controlled replay research for live-compatible `ofbot` strategies:
+
+```bash
+uv run python -m ofbot.cli research backtest-baseline \
+  --config config/local.paper.yaml \
+  --research-config config/research.continuation.yaml
+
+uv run python -m ofbot.cli research run \
+  --config config/local.paper.yaml \
+  --research-config config/research.continuation.yaml
+
+uv run python -m ofbot.cli research validate \
+  --config config/local.paper.yaml \
+  --research-config config/research.continuation.yaml \
+  --candidate-id continuation_xxxxxxxx
+
+uv run python -m ofbot.cli research promote-paper \
+  --config config/local.paper.yaml \
+  --research-config config/research.continuation.yaml \
+  --candidate-id continuation_xxxxxxxx
+
+uv run python -m ofbot.cli live \
+  --config data/research/deployments/active.paper.yaml \
+  --max-seconds 3600
+```
+
+See [Controlled Research Loop](docs/research_loop.md) for the full train/validation/test, robustness, registry and rollback workflow.
+
 Le pipeline supporte maintenant `trades` et `aggTrades` côté ingestion et normalisation `silver`. Exemple:
 
 ```bash

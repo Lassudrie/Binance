@@ -21,6 +21,7 @@ class RiskManager:
         max_notional: float,
         max_concurrent_exposure: int,
         cooldown_after_loss_s: int,
+        cooldown_after_trade_s: int,
         daily_loss_limit: float,
         max_holding_time_s: int,
         catastrophic_stop_loss_bps: float,
@@ -38,6 +39,7 @@ class RiskManager:
         self.max_notional = max_notional
         self.max_concurrent_exposure = max_concurrent_exposure
         self.cooldown_after_loss_s = cooldown_after_loss_s
+        self.cooldown_after_trade_s = cooldown_after_trade_s
         self.daily_loss_limit = daily_loss_limit
         self.max_holding_time_s = max_holding_time_s
         self.catastrophic_stop_loss_bps = catastrophic_stop_loss_bps
@@ -47,6 +49,7 @@ class RiskManager:
         self.trailing_stop_bps = trailing_stop_bps
         self.max_consecutive_losses = max_consecutive_losses or 99_999
         self._last_loss_cooldown_until: dict[str, datetime] = {}
+        self._last_trade_cooldown_until: dict[str, datetime] = {}
         self._daily_pnl: dict[str, float] = {}
         self._consecutive_losses: dict[str, int] = {}
         self._realized_pnl_by_day: dict[datetime.date, float] = {}
@@ -58,6 +61,7 @@ class RiskManager:
             self._position_highest_bps.pop(symbol, None)
             self._position_lowest_bps.pop(symbol, None)
         self._last_loss_cooldown_until = {}
+        self._last_trade_cooldown_until = {}
 
     def pre_entry_gate(
         self,
@@ -73,8 +77,10 @@ class RiskManager:
         projected_position_qty: float,
         projected_notional: float,
     ) -> tuple[bool, str | None]:
-        if self._is_in_cooldown(symbol, now):
+        if self._is_in_loss_cooldown(symbol, now):
             return False, "risk_cooldown"
+        if self._is_in_trade_cooldown(symbol, now):
+            return False, "risk_trade_cooldown"
         if not websocket_healthy:
             return False, "risk_broken_websocket"
         if event_timestamp < now - timedelta(seconds=self.stale_data_s):
@@ -127,6 +133,7 @@ class RiskManager:
         self._position_lowest_bps[symbol] = min(self._position_lowest_bps[symbol], net_pnl_bps_est)
 
         context = state.risk_context
+        preferred_exit_order_type = _preferred_exit_order_type(context)
         stop_loss = context.get("stop_loss_bps", self.stop_loss_bps)
         take_profit = context.get("take_profit_bps", self.take_profit_bps)
         trailing = context.get("trailing_stop_bps", self.trailing_stop_bps)
@@ -141,6 +148,7 @@ class RiskManager:
                     symbol=symbol,
                     reason="risk_max_holding",
                     detail=f"held_{int(held)}s",
+                    order_type=preferred_exit_order_type,
                 )
 
         if gross_pnl_bps <= -float(self.catastrophic_stop_loss_bps):
@@ -150,14 +158,29 @@ class RiskManager:
             return None
 
         if isinstance(stop_loss, (int, float)) and net_pnl_bps_est <= -float(stop_loss):
-            return _flat_decision(symbol, "risk_stop_loss", f"net_pnl_{net_pnl_bps_est:.2f}")
+            return _flat_decision(
+                symbol,
+                "risk_stop_loss",
+                f"net_pnl_{net_pnl_bps_est:.2f}",
+                order_type=preferred_exit_order_type,
+            )
         if isinstance(take_profit, (int, float)) and net_pnl_bps_est >= float(take_profit):
-            return _flat_decision(symbol, "risk_take_profit", f"net_pnl_{net_pnl_bps_est:.2f}")
+            return _flat_decision(
+                symbol,
+                "risk_take_profit",
+                f"net_pnl_{net_pnl_bps_est:.2f}",
+                order_type=preferred_exit_order_type,
+            )
         if isinstance(trailing, (int, float)) and trailing > 0:
             peak = self._position_highest_bps.get(symbol, net_pnl_bps_est)
             drawdown = peak - net_pnl_bps_est
             if net_pnl_bps_est >= 0 and drawdown >= float(trailing):
-                return _flat_decision(symbol, "risk_trailing_stop", f"drawdown_{drawdown:.2f}")
+                return _flat_decision(
+                    symbol,
+                    "risk_trailing_stop",
+                    f"drawdown_{drawdown:.2f}",
+                    order_type=preferred_exit_order_type,
+                )
         return None
 
     def clear_position_extremes(self, symbol: str) -> None:
@@ -165,6 +188,10 @@ class RiskManager:
         self._position_lowest_bps.pop(symbol, None)
 
     def register_realized_pnl(self, symbol: str, trade_realized_pnl: float, at_time: datetime) -> None:
+        if self.cooldown_after_trade_s > 0:
+            self._last_trade_cooldown_until[symbol] = at_time + timedelta(
+                seconds=self.cooldown_after_trade_s
+            )
         if trade_realized_pnl < 0 and self.cooldown_after_loss_s > 0:
             self._last_loss_cooldown_until[symbol] = at_time + timedelta(
                 seconds=self.cooldown_after_loss_s
@@ -175,8 +202,12 @@ class RiskManager:
         today = at_time.date()
         self._realized_pnl_by_day[today] = self._realized_pnl_by_day.get(today, 0.0) + trade_realized_pnl
 
-    def _is_in_cooldown(self, symbol: str, now: datetime) -> bool:
+    def _is_in_loss_cooldown(self, symbol: str, now: datetime) -> bool:
         until = self._last_loss_cooldown_until.get(symbol)
+        return until is not None and now <= until
+
+    def _is_in_trade_cooldown(self, symbol: str, now: datetime) -> bool:
+        until = self._last_trade_cooldown_until.get(symbol)
         return until is not None and now <= until
 
 
@@ -190,12 +221,26 @@ def _pnl_bps(state: PositionSnapshot) -> float:
     return (state.avg_entry_price / max(state.last_price or state.avg_entry_price, EPSILON) - 1.0) * 10_000.0
 
 
-def _flat_decision(symbol: str, reason: str, detail: str) -> StrategyDecision:
+def _flat_decision(
+    symbol: str,
+    reason: str,
+    detail: str,
+    *,
+    order_type: str = "market",
+) -> StrategyDecision:
     return StrategyDecision(
         symbol=symbol,
         side=0,
         target_qty=0.0,
         reason=reason,
         confidence=1.0,
-        entry_context={"exit_reason": detail},
+        order_type=order_type,
+        entry_context={"exit_reason": detail, "preferred_exit_order_type": order_type},
     )
+
+
+def _preferred_exit_order_type(context: dict[str, float | int | str | None]) -> str:
+    order_type = str(context.get("preferred_exit_order_type", "market") or "market").lower()
+    if order_type in {"market", "limit"}:
+        return order_type
+    return "market"

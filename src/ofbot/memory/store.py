@@ -208,6 +208,43 @@ class MemoryStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS offline_research_candidates (
+                id BIGINT PRIMARY KEY,
+                candidate_id VARCHAR UNIQUE,
+                strategy_name VARCHAR,
+                bar_size VARCHAR,
+                execution_mode VARCHAR,
+                status VARCHAR,
+                params JSON,
+                dataset_window VARCHAR,
+                config_hash VARCHAR,
+                report_dir VARCHAR,
+                summary JSON,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS candidate_rollouts (
+                id BIGINT PRIMARY KEY,
+                candidate_id VARCHAR,
+                run_id VARCHAR,
+                rollout_stage VARCHAR,
+                net_pnl DOUBLE,
+                trade_count INTEGER,
+                critical_risk_count INTEGER,
+                infrastructure_risk_count INTEGER,
+                active_config_path VARCHAR,
+                summary JSON,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+            """
+        )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
         existing = {
@@ -840,6 +877,158 @@ class MemoryStore:
             ],
         )
 
+    def upsert_offline_research_candidate(
+        self,
+        *,
+        candidate_id: str,
+        strategy_name: str,
+        bar_size: str,
+        execution_mode: str,
+        status: str,
+        params: dict[str, Any] | None,
+        dataset_window: str,
+        config_hash: str | None,
+        report_dir: str | None,
+        summary: dict[str, Any] | None,
+    ) -> None:
+        existing = self._conn.execute(
+            "SELECT COUNT(*) FROM offline_research_candidates WHERE candidate_id=?",
+            [candidate_id],
+        ).fetchone()[0]
+        now = _to_naive_datetime(datetime.now(UTC))
+        values = [
+            strategy_name,
+            bar_size,
+            execution_mode,
+            status,
+            _dump_json(params or {}),
+            dataset_window,
+            config_hash,
+            report_dir,
+            _dump_json(summary or {}),
+            now,
+            candidate_id,
+        ]
+        if existing:
+            self._conn.execute(
+                """
+                UPDATE offline_research_candidates
+                SET strategy_name=?, bar_size=?, execution_mode=?, status=?, params=?, dataset_window=?, config_hash=?, report_dir=?, summary=?, updated_at=?
+                WHERE candidate_id=?
+                """,
+                values,
+            )
+            return
+        self._conn.execute(
+            """
+            INSERT INTO offline_research_candidates
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                self.next_id("offline_research_candidates"),
+                candidate_id,
+                strategy_name,
+                bar_size,
+                execution_mode,
+                status,
+                _dump_json(params or {}),
+                dataset_window,
+                config_hash,
+                report_dir,
+                _dump_json(summary or {}),
+                now,
+                now,
+            ],
+        )
+
+    def list_offline_research_candidates(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        frame = self.run_query_df(
+            """
+            SELECT *
+            FROM offline_research_candidates
+            ORDER BY updated_at DESC, candidate_id ASC
+            LIMIT ?
+            """,
+            [limit],
+        )
+        return [normalize_record(row) for row in frame.to_dict(orient="records")]
+
+    def upsert_candidate_rollout(
+        self,
+        *,
+        candidate_id: str,
+        run_id: str,
+        rollout_stage: str,
+        net_pnl: float,
+        trade_count: int,
+        critical_risk_count: int,
+        infrastructure_risk_count: int,
+        active_config_path: str | None,
+        summary: dict[str, Any] | None,
+    ) -> None:
+        existing = self._conn.execute(
+            """
+            SELECT COUNT(*) FROM candidate_rollouts
+            WHERE candidate_id=? AND run_id=?
+            """,
+            [candidate_id, run_id],
+        ).fetchone()[0]
+        now = _to_naive_datetime(datetime.now(UTC))
+        values = [
+            rollout_stage,
+            net_pnl,
+            trade_count,
+            critical_risk_count,
+            infrastructure_risk_count,
+            active_config_path,
+            _dump_json(summary or {}),
+            now,
+            candidate_id,
+            run_id,
+        ]
+        if existing:
+            self._conn.execute(
+                """
+                UPDATE candidate_rollouts
+                SET rollout_stage=?, net_pnl=?, trade_count=?, critical_risk_count=?, infrastructure_risk_count=?, active_config_path=?, summary=?, updated_at=?
+                WHERE candidate_id=? AND run_id=?
+                """,
+                values,
+            )
+            return
+        self._conn.execute(
+            """
+            INSERT INTO candidate_rollouts
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                self.next_id("candidate_rollouts"),
+                candidate_id,
+                run_id,
+                rollout_stage,
+                net_pnl,
+                trade_count,
+                critical_risk_count,
+                infrastructure_risk_count,
+                active_config_path,
+                _dump_json(summary or {}),
+                now,
+                now,
+            ],
+        )
+
+    def get_candidate_rollouts(self, candidate_id: str) -> list[dict[str, Any]]:
+        frame = self.run_query_df(
+            """
+            SELECT *
+            FROM candidate_rollouts
+            WHERE candidate_id=?
+            ORDER BY created_at ASC, run_id ASC
+            """,
+            [candidate_id],
+        )
+        return [normalize_record(row) for row in frame.to_dict(orient="records")]
+
     def run_query_df(self, query: str, params: list[Any] | None = None) -> Any:
         return self._conn.execute(query, params or []).fetch_df()
 
@@ -848,6 +1037,23 @@ def _dump_json(payload: dict[str, Any] | None) -> str:
     import json
 
     return json.dumps(payload or {}, ensure_ascii=False)
+
+
+def normalize_record(payload: dict[str, Any]) -> dict[str, Any]:
+    import json
+
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    normalized[key] = json.loads(value)
+                    continue
+                except json.JSONDecodeError:
+                    pass
+        normalized[key] = value
+    return normalized
 
 
 def _to_naive_datetime(value: datetime) -> datetime:

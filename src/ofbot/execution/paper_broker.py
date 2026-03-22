@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -13,6 +14,12 @@ from ofbot.strategy.base import StrategyDecision
 
 
 EPSILON = 1e-12
+SOFT_EXIT_REASONS = {
+    "risk_max_holding",
+    "risk_stop_loss",
+    "risk_take_profit",
+    "risk_trailing_stop",
+}
 
 
 @dataclass(slots=True)
@@ -100,6 +107,15 @@ class PaperBroker:
         self._expire_intents(symbol=symbol, now=event_time)
 
         intent_key = self._intent_key(symbol, side, order_type, desired_qty)
+        if self._has_pending_soft_exit_order(
+            symbol=symbol,
+            side=side,
+            target_qty=desired_qty,
+            strategy_id=strategy_id,
+            context=decision.entry_context,
+        ):
+            return []
+
         if intent_key in self._intent_timestamps or self.has_equivalent_order(
             symbol=symbol,
             side=side,
@@ -165,6 +181,27 @@ class PaperBroker:
                 return True
         return False
 
+    def _has_pending_soft_exit_order(
+        self,
+        *,
+        symbol: str,
+        side: int,
+        target_qty: float,
+        strategy_id: str,
+        context: dict[str, float | int | str | None] | None,
+    ) -> bool:
+        if not self._is_soft_exit_context(strategy_id=strategy_id, context=context):
+            return False
+        for order in self._pending.get(symbol, []):
+            if not self._is_soft_exit_context(strategy_id=order.strategy_id, context=order.context):
+                continue
+            if order.side != side:
+                continue
+            if abs(order.target_qty - target_qty) >= EPSILON:
+                continue
+            return True
+        return False
+
     @property
     def pending_order_count(self) -> int:
         return sum(len(orders) for orders in self._pending.values())
@@ -176,6 +213,32 @@ class PaperBroker:
             for symbol, orders in self._pending.items()
             if orders
         }
+
+    def pending_orders(self, symbol: str) -> tuple[PaperOrder, ...]:
+        return tuple(self._pending.get(symbol, ()))
+
+    def drop_pending_orders(
+        self,
+        *,
+        symbol: str,
+        now: datetime,
+        reason: str,
+        predicate: Callable[[PaperOrder], bool] | None = None,
+    ) -> int:
+        if symbol not in self._pending:
+            return 0
+
+        kept: list[PaperOrder] = []
+        dropped = 0
+        for order in self._pending[symbol]:
+            if predicate is not None and not predicate(order):
+                kept.append(order)
+                continue
+            self._record_lifecycle(order, stage="dropped", reason=reason, now=now, force=True)
+            dropped += 1
+
+        self._pending[symbol] = kept
+        return dropped
 
     @property
     def lifecycle_stage_counts(self) -> dict[str, int]:
@@ -224,6 +287,10 @@ class PaperBroker:
                 self._record_lifecycle(order, stage="pending", reason="activation_wait", now=now)
                 next_batch.append(order)
                 continue
+
+            escalation_reason = self._soft_exit_escalation_reason(order=order, now=now, book=book)
+            if escalation_reason is not None:
+                self._escalate_soft_exit_order(order=order, now=now, reason=escalation_reason)
 
             fill, reason = self._simulate_fill(order=order, now=now, book=book)
             if fill is None:
@@ -316,6 +383,76 @@ class PaperBroker:
         if order.is_buy:
             return ask <= order.reference_price
         return bid >= order.reference_price
+
+    def _soft_exit_escalation_reason(
+        self,
+        *,
+        order: PaperOrder,
+        now: datetime,
+        book: OrderBookState | None,
+    ) -> str | None:
+        if order.order_type != "limit":
+            return None
+        if not self._is_soft_exit_context(strategy_id=order.strategy_id, context=order.context):
+            return None
+
+        ttl_s = max(0.0, float(self.config.soft_exit_limit_ttl_s))
+        if ttl_s > 0.0:
+            age_s = max(0.0, (now - order.event_time).total_seconds())
+            if age_s >= ttl_s:
+                return "soft_exit_limit_ttl_escalation"
+
+        adverse_bps = max(0.0, float(self.config.soft_exit_limit_adverse_bps))
+        if adverse_bps <= 0.0 or book is None:
+            return None
+
+        adverse_move_bps = self._soft_exit_adverse_move_bps(order=order, book=book)
+        if adverse_move_bps >= adverse_bps:
+            return "soft_exit_limit_adverse_escalation"
+        return None
+
+    def _soft_exit_adverse_move_bps(
+        self,
+        *,
+        order: PaperOrder,
+        book: OrderBookState,
+    ) -> float:
+        reference = max(float(order.reference_price or 0.0), EPSILON)
+        if order.side > 0:
+            best_offer = float(book.ask_price or 0.0)
+            if best_offer <= EPSILON:
+                return 0.0
+            return max(0.0, (best_offer / reference - 1.0) * 10_000.0)
+
+        best_bid = float(book.bid_price or 0.0)
+        if best_bid <= EPSILON:
+            return 0.0
+        return max(0.0, (reference / best_bid - 1.0) * 10_000.0)
+
+    def _escalate_soft_exit_order(
+        self,
+        *,
+        order: PaperOrder,
+        now: datetime,
+        reason: str,
+    ) -> None:
+        order.context = dict(order.context)
+        order.context["soft_exit_escalated"] = 1
+        order.context["soft_exit_escalation_reason"] = reason
+        order.context["soft_exit_original_order_type"] = order.order_type
+        order.order_type = "market"
+        self._record_lifecycle(order, stage="replaced", reason=reason, now=now, force=True)
+
+    @staticmethod
+    def _is_soft_exit_context(
+        *,
+        strategy_id: str | None,
+        context: dict[str, float | int | str | None] | None,
+    ) -> bool:
+        if str(strategy_id or "") != "risk":
+            return False
+        decision_reason = str((context or {}).get("decision_reason", "") or "")
+        return decision_reason in SOFT_EXIT_REASONS
 
     def _record_lifecycle(
         self,

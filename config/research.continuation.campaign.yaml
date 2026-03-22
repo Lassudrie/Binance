@@ -1,0 +1,66 @@
+strategy_name: continuation
+notes: >
+  Bounded short-session search around the aggressive paper baseline. Used by the
+  10 x 10 minute paper campaign to improve frequency without uncontrolled exploration.
+
+paths:
+  registry_dir: data/research/registry
+  artifacts_dir: data/research/runs
+  deployment_dir: data/research/deployments
+  active_paper_config_path: data/research/deployments/active.paper.yaml
+
+dataset:
+  raw_input_path: data/raw/raw_run_placeholder.parquet
+  timestamp_column: event_time
+  train_ratio: 0.50
+  validation_ratio: 0.25
+  test_ratio: 0.25
+  stability_subperiods: 2
+  walk_forward_windows: 1
+  walk_forward_train_ratio: 0.60
+  min_unique_timestamps: 120
+
+generation:
+  method: mutate
+  max_variants: 6
+  top_k_train: 2
+  top_k_validation: 1
+  seed: 42
+
+scoring:
+  min_trades: 2
+  pnl_scale: 1.5
+  drawdown_scale: 4.0
+  expectancy_scale: 0.10
+  max_drawdown_abs: 8.0
+  min_profit_factor: 0.75
+  min_win_rate: 0.35
+
+robustness:
+  min_subperiod_positive_ratio: 0.34
+  min_walk_forward_positive_ratio: 0.50
+  min_stressed_positive_ratio: 0.50
+  min_neighbor_positive_ratio: 0.50
+  stressed_maker_fee_multipliers: [1.0]
+  stressed_taker_fee_multipliers: [1.0, 1.15]
+  stressed_impact_multipliers: [1.0]
+  stressed_latency_ms_add: [0]
+
+selection:
+  min_validation_score_delta: 0.01
+  min_test_score_delta: 0.00
+  max_drawdown_increase_abs: 2.0
+  require_test_improvement: true
+  paper_window_minutes: 10
+
+param_spaces:
+  min_expected_net_edge_bps:
+    values: [-6.0, -5.0, -4.0, -3.0]
+  no_trade_z:
+    values: [0.0, 0.1, 0.25]
+  min_edge_cost_ratio:
+    values: [0.0, 0.1, 0.25]
+  max_holding_time_s:
+    values: [6, 10, 15]
+  reverse_exit_cvd_z:
+    values: [0.0, 0.25, 0.5]

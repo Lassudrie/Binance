@@ -13,6 +13,15 @@ from quantflow.validation.bootstrap import BootstrapResult, run_bootstrap_valida
 from quantflow.validation.walkforward import WalkForwardResult, run_walk_forward
 
 
+SUPPORTED_STRATEGIES = frozenset(
+    {
+        "cumdelta_reversion_v1",
+        "delta_impulse_continuation_v1",
+        "imbalance_burst_exhaustion_v1",
+    }
+)
+
+
 @dataclass(slots=True)
 class PassiveLimitSensitivityResult:
     scenarios: list[dict[str, Any]]
@@ -44,6 +53,10 @@ def _optional_float(value: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _rounded(value: float) -> float:
+    return round(float(value), 6)
 
 
 def _session_label(allowed_sessions: tuple[str, ...]) -> str:
@@ -148,7 +161,7 @@ def _execution_config(config: AppConfig, execution_mode: str) -> AppConfig:
 def _candidate_strategy_config(config: AppConfig, params: dict[str, Any]) -> StrategyConfig:
     return replace(
         config.strategy,
-        name="cumdelta_reversion_v1",
+        name=config.strategy.name,
         params=dict(params),
     )
 
@@ -157,8 +170,167 @@ def _candidate_strategy(config: AppConfig, params: dict[str, Any]) -> Any:
     return build_strategy(_candidate_strategy_config(config, params))
 
 
+def _ordered_unique(values: list[float]) -> list[float]:
+    seen: set[float] = set()
+    ordered: list[float] = []
+    for raw_value in values:
+        value = _rounded(raw_value)
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _around(base: float, *, step: float, minimum: float) -> list[float]:
+    safe_base = max(minimum, float(base))
+    return _ordered_unique(
+        [
+            max(minimum, safe_base - step),
+            safe_base,
+            safe_base + step,
+        ]
+    )
+
+
+def _seed_params(config: AppConfig) -> dict[str, Any]:
+    strategy_name = config.strategy.name
+    params = dict(config.strategy.params)
+    params.setdefault("vol_regime_min", 0.0)
+    params.setdefault("allowed_sessions", [])
+
+    if strategy_name == "cumdelta_reversion_v1":
+        params.setdefault("entry_z", 1.0)
+        params.setdefault("exit_z", 0.1)
+        return params
+    if strategy_name == "delta_impulse_continuation_v1":
+        params.setdefault("source", "delta_rz")
+        params.setdefault("entry_z", 1.0)
+        params.setdefault("exit_z", 0.25)
+        return params
+    if strategy_name == "imbalance_burst_exhaustion_v1":
+        params.setdefault("imbalance_z", 1.0)
+        params.setdefault("burst_z", 1.0)
+        params.setdefault("exit_z", 0.25)
+        return params
+    raise ValueError(
+        "Candidate deep dive requires strategy.name in "
+        f"{sorted(SUPPORTED_STRATEGIES)}"
+    )
+
+
+def _params_with_filters(
+    *,
+    base_params: dict[str, Any],
+    vol_regime_min: float,
+    allowed_sessions: tuple[str, ...],
+) -> dict[str, Any]:
+    params = dict(base_params)
+    params["vol_regime_min"] = float(vol_regime_min)
+    params["allowed_sessions"] = list(allowed_sessions)
+    return params
+
+
+def _phase2_param_grid(
+    *,
+    strategy_name: str,
+    filter_params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if strategy_name == "cumdelta_reversion_v1":
+        base_entry = max(1.0, float(filter_params.get("entry_z", 1.0)))
+        base_exit = max(0.05, float(filter_params.get("exit_z", 0.1)))
+        entry_values = _ordered_unique(
+            [
+                base_entry,
+                base_entry + 0.25,
+                base_entry + 0.5,
+            ]
+        )
+        exit_values = _ordered_unique(
+            [
+                max(0.05, base_exit * 0.5),
+                base_exit,
+                max(base_exit + 0.15, base_exit * 2.5),
+            ]
+        )
+        return [
+            {
+                **filter_params,
+                "entry_z": entry_z,
+                "exit_z": exit_z,
+            }
+            for entry_z, exit_z in product(entry_values, exit_values)
+        ]
+
+    if strategy_name == "delta_impulse_continuation_v1":
+        entry_values = _around(
+            float(filter_params.get("entry_z", 1.0)),
+            step=0.25,
+            minimum=0.5,
+        )
+        exit_values = _around(
+            float(filter_params.get("exit_z", 0.25)),
+            step=max(0.1, float(filter_params.get("exit_z", 0.25)) * 0.5),
+            minimum=0.0,
+        )
+        return [
+            {
+                **filter_params,
+                "entry_z": entry_z,
+                "exit_z": exit_z,
+            }
+            for entry_z, exit_z in product(entry_values, exit_values)
+        ]
+
+    if strategy_name == "imbalance_burst_exhaustion_v1":
+        imbalance_values = _around(
+            float(filter_params.get("imbalance_z", 1.0)),
+            step=0.25,
+            minimum=0.5,
+        )
+        burst_values = _around(
+            float(filter_params.get("burst_z", 1.0)),
+            step=0.25,
+            minimum=0.25,
+        )
+        exit_values = _around(
+            float(filter_params.get("exit_z", 0.25)),
+            step=max(0.1, float(filter_params.get("exit_z", 0.25)) * 0.5),
+            minimum=0.0,
+        )
+        return [
+            {
+                **filter_params,
+                "imbalance_z": imbalance_z,
+                "burst_z": burst_z,
+                "exit_z": exit_z,
+            }
+            for imbalance_z, burst_z, exit_z in product(
+                imbalance_values,
+                burst_values,
+                exit_values,
+            )
+        ]
+
+    raise ValueError(f"Unsupported strategy for phase 2: {strategy_name}")
+
+
+def _phase2_scenario_name(strategy_name: str, phase1_name: str, params: dict[str, Any]) -> str:
+    if strategy_name in {"cumdelta_reversion_v1", "delta_impulse_continuation_v1"}:
+        return (
+            f"{phase1_name}__entry_{float(params['entry_z']):g}"
+            f"__exit_{float(params['exit_z']):g}"
+        )
+    return (
+        f"{phase1_name}__imbalance_{float(params['imbalance_z']):g}"
+        f"__burst_{float(params['burst_z']):g}"
+        f"__exit_{float(params['exit_z']):g}"
+    )
+
+
 def _scenario_row(
     *,
+    strategy_name: str,
     phase: str,
     phase1_scenario_name: str | None,
     execution_mode: str,
@@ -170,13 +342,17 @@ def _scenario_row(
 ) -> dict[str, Any]:
     allowed_sessions = tuple(params.get("allowed_sessions") or ())
     return {
+        "strategy_name": strategy_name,
         "phase": phase,
         "phase1_scenario_name": phase1_scenario_name,
         "execution_mode": execution_mode,
         "scenario_name": scenario_name,
         "filter_family": filter_family,
-        "entry_z": float(params["entry_z"]),
-        "exit_z": float(params["exit_z"]),
+        "source": params.get("source"),
+        "entry_z": _optional_float(params.get("entry_z")),
+        "imbalance_z": _optional_float(params.get("imbalance_z")),
+        "burst_z": _optional_float(params.get("burst_z")),
+        "exit_z": _optional_float(params.get("exit_z")),
         "vol_regime_min": float(params["vol_regime_min"]),
         "allowed_sessions": _session_label(allowed_sessions),
         "full_sample_net_pnl": float(backtest.metrics["net_pnl"]),
@@ -424,24 +600,17 @@ def run_candidate_deep_dive(
     features: pl.DataFrame,
     config: AppConfig,
 ) -> CandidateDeepDiveResult:
-    if config.strategy.name != "cumdelta_reversion_v1":
-        raise ValueError("Candidate deep dive requires strategy.name = cumdelta_reversion_v1")
-
+    strategy_name = config.strategy.name
+    base_params = _seed_params(config)
     passive_config = _execution_config(config, "passive")
-    base_params = {
-        "entry_z": float(config.strategy.params.get("entry_z", 1.0)),
-        "exit_z": float(config.strategy.params.get("exit_z", 0.1)),
-        "vol_regime_min": 0.0,
-        "allowed_sessions": [],
-    }
 
     phase1_rows: list[dict[str, Any]] = []
     for scenario in _phase1_filter_scenarios():
-        params = {
-            **base_params,
-            "vol_regime_min": float(scenario["vol_regime_min"]),
-            "allowed_sessions": list(scenario["allowed_sessions_tuple"]),
-        }
+        params = _params_with_filters(
+            base_params=base_params,
+            vol_regime_min=float(scenario["vol_regime_min"]),
+            allowed_sessions=tuple(scenario["allowed_sessions_tuple"]),
+        )
         backtest = run_backtest(
             features,
             _candidate_strategy(passive_config, params),
@@ -459,6 +628,7 @@ def run_candidate_deep_dive(
         )
         phase1_rows.append(
             _scenario_row(
+                strategy_name=strategy_name,
                 phase="phase1",
                 phase1_scenario_name=None,
                 execution_mode="passive",
@@ -475,21 +645,18 @@ def run_candidate_deep_dive(
 
     phase2_rows: list[dict[str, Any]] = []
     for phase1_row in top_phase1:
-        filter_params = {
-            "vol_regime_min": float(phase1_row["vol_regime_min"]),
-            "allowed_sessions": []
+        filter_params = dict(base_params)
+        filter_params["vol_regime_min"] = float(phase1_row["vol_regime_min"])
+        filter_params["allowed_sessions"] = (
+            []
             if phase1_row["allowed_sessions"] == "all"
-            else str(phase1_row["allowed_sessions"]).split("+"),
-        }
-        for entry_z, exit_z in product([1.0, 1.25, 1.5], [0.05, 0.1, 0.25]):
-            params = {
-                **base_params,
-                **filter_params,
-                "entry_z": float(entry_z),
-                "exit_z": float(exit_z),
-            }
-            scenario_name = (
-                f"{phase1_row['scenario_name']}__entry_{entry_z:g}__exit_{exit_z:g}"
+            else str(phase1_row["allowed_sessions"]).split("+")
+        )
+        for params in _phase2_param_grid(strategy_name=strategy_name, filter_params=filter_params):
+            scenario_name = _phase2_scenario_name(
+                strategy_name,
+                str(phase1_row["scenario_name"]),
+                params,
             )
             backtest = run_backtest(
                 features,
@@ -508,6 +675,7 @@ def run_candidate_deep_dive(
             )
             phase2_rows.append(
                 _scenario_row(
+                    strategy_name=strategy_name,
                     phase="phase2",
                     phase1_scenario_name=str(phase1_row["scenario_name"]),
                     execution_mode="passive",
@@ -525,12 +693,19 @@ def run_candidate_deep_dive(
 
     best_scenario = dict(ranked_phase2[0])
     best_params = {
-        "entry_z": float(best_scenario["entry_z"]),
-        "exit_z": float(best_scenario["exit_z"]),
-        "vol_regime_min": float(best_scenario["vol_regime_min"]),
-        "allowed_sessions": []
-        if best_scenario["allowed_sessions"] == "all"
-        else str(best_scenario["allowed_sessions"]).split("+"),
+        key: value
+        for key, value in {
+            "source": best_scenario.get("source"),
+            "entry_z": best_scenario.get("entry_z"),
+            "imbalance_z": best_scenario.get("imbalance_z"),
+            "burst_z": best_scenario.get("burst_z"),
+            "exit_z": best_scenario.get("exit_z"),
+            "vol_regime_min": float(best_scenario["vol_regime_min"]),
+            "allowed_sessions": []
+            if best_scenario["allowed_sessions"] == "all"
+            else str(best_scenario["allowed_sessions"]).split("+"),
+        }.items()
+        if value is not None
     }
 
     best_backtest = run_backtest(
@@ -570,6 +745,7 @@ def run_candidate_deep_dive(
         best_bootstrap,
     )
     aggregate = {
+        "strategy_name": strategy_name,
         "phase1_scenario_count": len(ranked_phase1),
         "phase2_grid_count": len(ranked_phase2),
         "top_phase1_scenario_name": top_phase1[0]["scenario_name"] if top_phase1 else None,

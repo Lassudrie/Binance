@@ -16,7 +16,11 @@ def test_build_run_report_is_scoped_to_run_id(tmp_path) -> None:
             symbol="BTCUSDT",
             action="signal",
             strategy="continuation",
-            params={"estimated_entry_cost_bps": 11.0, "expected_net_edge_bps": 5.5},
+            params={
+                "estimated_entry_cost_bps": 11.0,
+                "expected_net_edge_bps": 5.5,
+                "fee_coverage_ratio": 1.8,
+            },
             order_intent="submit",
             reason="continuation_long",
         )

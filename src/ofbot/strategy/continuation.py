@@ -30,6 +30,7 @@ class ContinuationStrategy(Strategy):
         queue_imbalance_threshold: float = 0.04,
         microprice_drift_threshold_bps: float = 2.5,
         min_expected_net_edge_bps: float = 3.0,
+        expected_move_discount: float = 1.0,
         edge_fast_horizon_s: int = 15,
         edge_slow_horizon_s: int = 30,
         edge_fast_weight: float = 0.6,
@@ -38,6 +39,17 @@ class ContinuationStrategy(Strategy):
         edge_queue_bonus_bps: float = 4.0,
         edge_bonus_cap_bps: float = 12.0,
         min_momentum_5s_bps: float = 0.8,
+        min_edge_cost_ratio: float = 0.0,
+        min_fee_coverage_ratio: float = 0.0,
+        require_trend_up_regime: bool = False,
+        require_trend_down_regime_for_short: bool = False,
+        revalidate_on_fill: bool = False,
+        revalidate_grace_period_s: float = 0.0,
+        revalidate_drop_on_neutral: bool = True,
+        strong_signal_expected_move_discount: float | None = None,
+        strong_signal_min_edge_cost_ratio: float | None = None,
+        strong_signal_min_momentum_5s_bps: float = 0.0,
+        strong_signal_min_cvd_z: float = 0.0,
         spread_bps_max: float = 180.0,
         volatility_bps_max: float = 700.0,
         notrade_z: float = 0.15,
@@ -47,16 +59,20 @@ class ContinuationStrategy(Strategy):
         reverse_exit_cvd_z: float = 1.0,
         reverse_exit_queue_imbalance: float = 0.85,
         reverse_exit_microprice_drift_bps: float = 0.1,
+        reverse_exit_min_abs_pnl_bps: float = 0.0,
         stop_loss_bps: float = 70.0,
         take_profit_bps: float = 150.0,
         trailing_stop_bps: float = 35.0,
         order_type: str = "market",
+        exit_order_type: str = "market",
+        exit_cost_order_type: str = "market",
     ) -> None:
         super().__init__("continuation")
         self.trend_alignment_threshold = trend_alignment_threshold
         self.queue_imbalance_threshold = queue_imbalance_threshold
         self.microprice_drift_threshold_bps = microprice_drift_threshold_bps
         self.min_expected_net_edge_bps = min_expected_net_edge_bps
+        self.expected_move_discount = max(0.0, min(1.0, float(expected_move_discount)))
         self.edge_fast_horizon_s = max(1, int(edge_fast_horizon_s))
         self.edge_slow_horizon_s = max(self.edge_fast_horizon_s, int(edge_slow_horizon_s))
         weight_sum = max(float(edge_fast_weight) + float(edge_slow_weight), 1e-12)
@@ -66,6 +82,25 @@ class ContinuationStrategy(Strategy):
         self.edge_queue_bonus_bps = max(0.0, float(edge_queue_bonus_bps))
         self.edge_bonus_cap_bps = max(0.0, float(edge_bonus_cap_bps))
         self.min_momentum_5s_bps = min_momentum_5s_bps
+        self.min_edge_cost_ratio = max(0.0, float(min_edge_cost_ratio))
+        self.min_fee_coverage_ratio = max(0.0, float(min_fee_coverage_ratio))
+        self.require_trend_up_regime = bool(require_trend_up_regime)
+        self.require_trend_down_regime_for_short = bool(require_trend_down_regime_for_short)
+        self.revalidate_on_fill = bool(revalidate_on_fill)
+        self.revalidate_grace_period_s = max(0.0, float(revalidate_grace_period_s))
+        self.revalidate_drop_on_neutral = bool(revalidate_drop_on_neutral)
+        self.strong_signal_expected_move_discount = (
+            None
+            if strong_signal_expected_move_discount is None
+            else max(0.0, min(1.0, float(strong_signal_expected_move_discount)))
+        )
+        self.strong_signal_min_edge_cost_ratio = (
+            None
+            if strong_signal_min_edge_cost_ratio is None
+            else max(0.0, float(strong_signal_min_edge_cost_ratio))
+        )
+        self.strong_signal_min_momentum_5s_bps = max(0.0, float(strong_signal_min_momentum_5s_bps))
+        self.strong_signal_min_cvd_z = max(0.0, float(strong_signal_min_cvd_z))
         self.spread_bps_max = spread_bps_max
         self.volatility_bps_max = volatility_bps_max
         self.no_trade_z = notrade_z if no_trade_z is None else no_trade_z
@@ -74,10 +109,15 @@ class ContinuationStrategy(Strategy):
         self.reverse_exit_cvd_z = reverse_exit_cvd_z
         self.reverse_exit_queue_imbalance = reverse_exit_queue_imbalance
         self.reverse_exit_microprice_drift_bps = reverse_exit_microprice_drift_bps
+        self.reverse_exit_min_abs_pnl_bps = max(0.0, float(reverse_exit_min_abs_pnl_bps))
         self.stop_loss_bps = stop_loss_bps
         self.take_profit_bps = take_profit_bps
         self.trailing_stop_bps = trailing_stop_bps
         self.order_type = order_type if order_type in {"market", "limit"} else "market"
+        self.exit_order_type = exit_order_type if exit_order_type in {"market", "limit"} else "market"
+        self.exit_cost_order_type = (
+            exit_cost_order_type if exit_cost_order_type in {"market", "limit"} else "market"
+        )
 
     def decide(
         self,
@@ -116,7 +156,11 @@ class ContinuationStrategy(Strategy):
             default=_feature(snapshot, "short_return_bps_5s"),
         )
 
+        regime = _extract_regime(snapshot)
+        trend_regime_ok = (not self.require_trend_up_regime) or regime.trend == "trend_up"
         aligned = (
+            trend_regime_ok
+            and
             cvd > self.trend_alignment_threshold
             and cvd_z >= self.no_trade_z
             and queue_imb > self.queue_imbalance_threshold
@@ -129,7 +173,6 @@ class ContinuationStrategy(Strategy):
             and queue_imb <= -self.reverse_exit_queue_imbalance
             and micro_drift <= -self.reverse_exit_microprice_drift_bps
         )
-        regime = _extract_regime(snapshot)
         context: dict[str, float | int | str | None] = {
             "strategy": self.name,
             "cvd_base_1s": cvd,
@@ -139,11 +182,22 @@ class ContinuationStrategy(Strategy):
             "momentum_bps_1s": momentum,
             "momentum_bps_5s": momentum_5s,
             "min_expected_net_edge_bps": self.min_expected_net_edge_bps,
+            "require_trend_up_regime": int(self.require_trend_up_regime),
+            "require_trend_down_regime_for_short": int(self.require_trend_down_regime_for_short),
+            "revalidate_on_fill": int(self.revalidate_on_fill),
+            "revalidate_grace_period_s": self.revalidate_grace_period_s,
+            "revalidate_drop_on_neutral": int(self.revalidate_drop_on_neutral),
+            "preferred_exit_order_type": self.exit_order_type,
             "regime": str(regime.as_dict()),
         }
 
         if long_only:
-            if current > 0 and self._held_long_enough(snapshot.event_time, state.position_open_time) and reverse:
+            if (
+                current > 0
+                and self._held_long_enough(snapshot.event_time, state.position_open_time)
+                and reverse
+                and self._reverse_exit_pnl_ok(snapshot, state)
+            ):
                 return self._flat_decision(
                     snapshot=snapshot,
                     reason="continuation_reverse_exit",
@@ -168,7 +222,11 @@ class ContinuationStrategy(Strategy):
         if current != 0:
             direction = 1 if current > 0 else -1
             directional_reverse = reverse if direction > 0 else aligned
-            if self._held_long_enough(snapshot.event_time, state.position_open_time) and directional_reverse:
+            if (
+                self._held_long_enough(snapshot.event_time, state.position_open_time)
+                and directional_reverse
+                and self._reverse_exit_pnl_ok(snapshot, state)
+            ):
                 return self._flat_decision(
                     snapshot=snapshot,
                     reason="continuation_reverse_exit",
@@ -193,6 +251,8 @@ class ContinuationStrategy(Strategy):
                 )
             return None
         if reverse:
+            if self.require_trend_down_regime_for_short and regime.trend != "trend_down":
+                return None
             return StrategyDecision(
                 symbol=snapshot.symbol,
                 side=-1,
@@ -232,7 +292,12 @@ class ContinuationStrategy(Strategy):
             target_qty=0.0,
             reason=reason,
             confidence=0.2,
-            entry_context={"exit_reason": detail, "strategy": self.name},
+            order_type=self.exit_order_type,
+            entry_context={
+                "exit_reason": detail,
+                "strategy": self.name,
+                "preferred_exit_order_type": self.exit_order_type,
+            },
         )
 
     def _held_long_enough(
@@ -244,6 +309,16 @@ class ContinuationStrategy(Strategy):
             return False
         return (now - opened_at).total_seconds() >= self.min_hold_before_discretionary_exit_s
 
+    def _reverse_exit_pnl_ok(
+        self,
+        snapshot: FeatureSnapshot,
+        state: PositionSnapshot,
+    ) -> bool:
+        if self.reverse_exit_min_abs_pnl_bps <= 0.0:
+            return True
+        current_pnl_bps = _position_pnl_bps(snapshot, state)
+        return abs(current_pnl_bps) >= self.reverse_exit_min_abs_pnl_bps
+
     def reset(self) -> None:
         return
 
@@ -253,6 +328,7 @@ class ContinuationStrategy(Strategy):
             "queue_imbalance_threshold": self.queue_imbalance_threshold,
             "microprice_drift_threshold_bps": self.microprice_drift_threshold_bps,
             "min_expected_net_edge_bps": self.min_expected_net_edge_bps,
+            "expected_move_discount": self.expected_move_discount,
             "edge_fast_horizon_s": self.edge_fast_horizon_s,
             "edge_slow_horizon_s": self.edge_slow_horizon_s,
             "edge_fast_weight": self.edge_fast_weight,
@@ -261,6 +337,17 @@ class ContinuationStrategy(Strategy):
             "edge_queue_bonus_bps": self.edge_queue_bonus_bps,
             "edge_bonus_cap_bps": self.edge_bonus_cap_bps,
             "min_momentum_5s_bps": self.min_momentum_5s_bps,
+            "min_edge_cost_ratio": self.min_edge_cost_ratio,
+            "min_fee_coverage_ratio": self.min_fee_coverage_ratio,
+            "require_trend_up_regime": self.require_trend_up_regime,
+            "require_trend_down_regime_for_short": self.require_trend_down_regime_for_short,
+            "revalidate_on_fill": self.revalidate_on_fill,
+            "revalidate_grace_period_s": self.revalidate_grace_period_s,
+            "revalidate_drop_on_neutral": self.revalidate_drop_on_neutral,
+            "strong_signal_expected_move_discount": self.strong_signal_expected_move_discount or 0.0,
+            "strong_signal_min_edge_cost_ratio": self.strong_signal_min_edge_cost_ratio or 0.0,
+            "strong_signal_min_momentum_5s_bps": self.strong_signal_min_momentum_5s_bps,
+            "strong_signal_min_cvd_z": self.strong_signal_min_cvd_z,
             "spread_bps_max": self.spread_bps_max,
             "volatility_bps_max": self.volatility_bps_max,
             "no_trade_z": self.no_trade_z,
@@ -269,8 +356,22 @@ class ContinuationStrategy(Strategy):
             "reverse_exit_cvd_z": self.reverse_exit_cvd_z,
             "reverse_exit_queue_imbalance": self.reverse_exit_queue_imbalance,
             "reverse_exit_microprice_drift_bps": self.reverse_exit_microprice_drift_bps,
+            "reverse_exit_min_abs_pnl_bps": self.reverse_exit_min_abs_pnl_bps,
             "stop_loss_bps": self.stop_loss_bps,
             "take_profit_bps": self.take_profit_bps,
             "trailing_stop_bps": self.trailing_stop_bps,
             "order_type": self.order_type,
+            "exit_order_type": self.exit_order_type,
+            "exit_cost_order_type": self.exit_cost_order_type,
         }
+
+
+def _position_pnl_bps(snapshot: FeatureSnapshot, state: PositionSnapshot) -> float:
+    if abs(state.avg_entry_price) <= 1e-12 or abs(state.net_position) <= 1e-12:
+        return 0.0
+    price = float(snapshot.mid_price or state.last_price or 0.0)
+    if price <= 1e-12:
+        return 0.0
+    if state.net_position > 0:
+        return (price / state.avg_entry_price - 1.0) * 10_000.0
+    return (state.avg_entry_price / price - 1.0) * 10_000.0

@@ -1,0 +1,152 @@
+mode: paper_local
+symbols:
+- BTCUSDT
+- ETHUSDT
+feature_profile: orderflow_hft_v1
+universe_seed: 31
+live_telemetry_interval_s: 10
+live_telemetry_top_k: 3
+paths:
+  root: /home/alex/projects/Binance
+  raw_dir: /home/alex/projects/Binance/data/raw
+  reports_dir: /home/alex/projects/Binance/reports
+  memory_dir: /home/alex/projects/Binance/data/memory
+gateway:
+  public_ws_base: wss://stream.binance.com:9443/stream
+  public_rest_base: https://api.binance.com/api
+  public_ws_reconnect_initial_delay_s: 1.0
+  public_ws_reconnect_max_delay_s: 30.0
+  heartbeat_timeout_s: 8.0
+  request_timeout_s: 20
+  depth_stream: 100ms
+  depth_snapshot_limit: 1000
+  book_ticker_divergence_bps: 50.0
+  include_kline_1m: false
+  max_queue_size: 2500
+features:
+  horizons_sec:
+  - 1
+  - 5
+  - 15
+  - 30
+  - 60
+  - 180
+  feature_window_sec: 900
+  large_trade_quantile: 0.9
+  volatility_window_sec: 60
+  zscore_window: 200
+  microprice_window_sec: 120
+execution:
+  mode: paper_local
+  allow_short: true
+  initial_cash: 100000.0
+  taker_fee_bps: 8.0
+  maker_fee_bps: 2.0
+  default_target_notional_usd: 150.0
+  min_target_notional_usd: 50.0
+  max_target_notional_usd: 250.0
+  base_spread_bps: 2.0
+  fallback_half_spread_bps: 1.0
+  impact_bps_per_unit_participation: 8.0
+  market_sweep_depth_bps: 25.0
+  latency_ms: 150
+  market_participation_cap: 0.25
+  limit_order_book_depth_bps: 4.0
+  max_order_lifetime_s: 2
+  allow_limit_orders: true
+risk:
+  stale_data_s: 6.0
+  broken_ws_s: 10.0
+  abnormal_spread_bps: 220.0
+  abnormal_volatility_bps: 900.0
+  max_position_size: 4.0
+  max_notional: 40000.0
+  max_concurrent_exposure: 2
+  cooldown_after_loss_s: 0
+  daily_loss_limit: 0.02
+  max_holding_time_s: 20
+  catastrophic_stop_loss_bps: 45.0
+  min_hold_before_soft_exit_s: 1
+  stop_loss_bps: 6.0
+  take_profit_bps: 8.0
+  trailing_stop_bps: 2.0
+  spread_gate_enabled: true
+  volatility_gate_enabled: true
+  max_consecutive_losses: 99
+strategy_library:
+  continuation:
+    name: continuation
+    params:
+      trend_alignment_threshold: 0.0
+      queue_imbalance_threshold: 0.0
+      microprice_drift_threshold_bps: 0.0
+      min_expected_net_edge_bps: -5.0
+      expected_move_discount: 1.0
+      edge_fast_horizon_s: 1
+      edge_slow_horizon_s: 5
+      edge_fast_weight: 0.85
+      edge_slow_weight: 0.15
+      edge_cvd_bonus_bps: 2.0
+      edge_queue_bonus_bps: 6.0
+      edge_bonus_cap_bps: 20.0
+      min_momentum_5s_bps: 0.0
+      min_edge_cost_ratio: 0.0
+      require_trend_up_regime: false
+      revalidate_on_fill: false
+      strong_signal_expected_move_discount: 1.0
+      strong_signal_min_edge_cost_ratio: 0.0
+      strong_signal_min_momentum_5s_bps: 0.0
+      strong_signal_min_cvd_z: 0.0
+      no_trade_z: 0.0
+      max_holding_time_s: 10
+      min_hold_before_discretionary_exit_s: 1
+      reverse_exit_cvd_z: 0.0
+      reverse_exit_queue_imbalance: 0.0
+      reverse_exit_microprice_drift_bps: 0.0
+      spread_bps_max: 20.0
+      volatility_bps_max: 1200.0
+      order_type: market
+      exit_cost_order_type: market
+    enabled: true
+  exhaustion:
+    name: exhaustion
+    params:
+      burst_threshold: 2.2
+      extreme_flow_threshold: 2.0
+      decay_momentum_threshold: 0.35
+      max_holding_time_s: 540
+      spread_bps_max: 200.0
+      volatility_bps_max: 900.0
+    enabled: false
+  hybrid:
+    name: hybrid
+    params:
+      regime_confidence_threshold: 0.55
+      continuation_label: continuation
+      exhaustion_label: exhaustion
+      time_exit_s: 600
+      spread_bps_max: 190.0
+      volatility_bps_max: 750.0
+    enabled: false
+  default: continuation
+learning:
+  enabled: false
+  duckdb_path: /home/alex/projects/Binance/data/memory/learning.duckdb
+  min_samples_per_regime: 10
+  min_samples_total: 24
+  min_improvement_bps: 6.0
+  max_drawdown_bps: 120.0
+  rolling_window: 50
+  confidence: 0.82
+  enable_promotion: false
+housekeeping:
+  enabled: true
+  keep_recent_run_raw: 12
+  keep_recent_report_csv: 8
+  preserve_pending_candidate_sources: true
+  remove_tmp_pytest: true
+  status_markdown_path: /home/alex/projects/Binance/docs/live_learning_status.md
+paper_local_record_raw: true
+seed: 42
+report_time: today
+enable_testnet_signed_endpoints: false

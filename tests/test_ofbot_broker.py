@@ -27,6 +27,22 @@ def _book() -> OrderBookState:
     return book
 
 
+def _soft_exit_decision(*, order_type: str = "limit") -> StrategyDecision:
+    return StrategyDecision(
+        symbol="BTCUSDT",
+        side=0,
+        target_qty=0.0,
+        reason="risk_max_holding",
+        confidence=1.0,
+        order_type=order_type,
+        entry_context={
+            "decision_reason": "risk_max_holding",
+            "preferred_exit_order_type": order_type,
+            "strategy": "risk",
+        },
+    )
+
+
 def _depth_book() -> OrderBookState:
     book = OrderBookState(symbol="BTCUSDT", require_depth_sync=True, book_ticker_divergence_bps=25.0)
     book.apply_book_ticker(
@@ -325,3 +341,134 @@ def test_broker_marks_expired_orders_with_reason() -> None:
     assert broker.lifecycle_reason_counts["expired"] == 1
     assert broker.last_lifecycle_event is not None
     assert broker.last_lifecycle_event["reason"] == "expired"
+
+
+def test_broker_can_drop_pending_orders_with_custom_reason() -> None:
+    broker = PaperBroker(
+        ExecutionConfig(
+            allow_limit_orders=True,
+            max_order_lifetime_s=5,
+            latency_ms=250,
+            taker_fee_bps=8.0,
+            fallback_half_spread_bps=1.0,
+            impact_bps_per_unit_participation=8.0,
+        )
+    )
+    event_time = datetime(2026, 1, 1, tzinfo=UTC)
+    decision = StrategyDecision(
+        symbol="BTCUSDT",
+        side=1,
+        target_qty=0.4,
+        reason="invalidate",
+        order_type="market",
+    )
+    orders = broker.queue_from_decision(
+        decision=decision,
+        symbol="BTCUSDT",
+        current_qty=0.0,
+        reference_price=100.0,
+        event_time=event_time,
+        strategy_id="invalidate",
+    )
+    broker.submit(orders[0])
+
+    dropped = broker.drop_pending_orders(
+        symbol="BTCUSDT",
+        now=event_time,
+        reason="signal_invalidated",
+    )
+
+    assert dropped == 1
+    assert broker.pending_order_count == 0
+    assert broker.lifecycle_stage_counts["dropped"] == 1
+    assert broker.lifecycle_reason_counts["signal_invalidated"] == 1
+    assert broker.last_lifecycle_event is not None
+    assert broker.last_lifecycle_event["reason"] == "signal_invalidated"
+
+
+def test_broker_escalates_soft_exit_limit_to_market_after_ttl_and_blocks_duplicate_exit() -> None:
+    broker = PaperBroker(
+        ExecutionConfig(
+            allow_limit_orders=True,
+            max_order_lifetime_s=5,
+            latency_ms=0,
+            taker_fee_bps=8.0,
+            maker_fee_bps=2.0,
+            fallback_half_spread_bps=1.0,
+            impact_bps_per_unit_participation=8.0,
+            soft_exit_limit_ttl_s=1.0,
+            soft_exit_limit_adverse_bps=0.0,
+        )
+    )
+    event_time = datetime(2026, 1, 1, tzinfo=UTC)
+    decision = _soft_exit_decision(order_type="limit")
+
+    orders = broker.queue_from_decision(
+        decision=decision,
+        symbol="BTCUSDT",
+        current_qty=1.0,
+        reference_price=100.0,
+        event_time=event_time,
+        strategy_id="risk",
+    )
+    assert len(orders) == 1
+    broker.submit(orders[0])
+
+    fills = broker.process(symbol="BTCUSDT", now=event_time + timedelta(seconds=2), book=None)
+
+    assert fills == []
+    pending = broker.pending_orders("BTCUSDT")
+    assert len(pending) == 1
+    assert pending[0].order_type == "market"
+    assert broker.lifecycle_reason_counts["soft_exit_limit_ttl_escalation"] == 1
+
+    duplicate = broker.queue_from_decision(
+        decision=decision,
+        symbol="BTCUSDT",
+        current_qty=1.0,
+        reference_price=100.0,
+        event_time=event_time + timedelta(seconds=2),
+        strategy_id="risk",
+    )
+    assert duplicate == []
+
+
+def test_broker_escalates_soft_exit_limit_to_market_on_adverse_move() -> None:
+    broker = PaperBroker(
+        ExecutionConfig(
+            allow_limit_orders=True,
+            max_order_lifetime_s=5,
+            latency_ms=0,
+            taker_fee_bps=8.0,
+            maker_fee_bps=2.0,
+            fallback_half_spread_bps=1.0,
+            impact_bps_per_unit_participation=8.0,
+            soft_exit_limit_ttl_s=0.0,
+            soft_exit_limit_adverse_bps=50.0,
+        )
+    )
+    event_time = datetime(2026, 1, 1, tzinfo=UTC)
+    decision = _soft_exit_decision(order_type="limit")
+
+    orders = broker.queue_from_decision(
+        decision=decision,
+        symbol="BTCUSDT",
+        current_qty=1.0,
+        reference_price=100.0,
+        event_time=event_time,
+        strategy_id="risk",
+    )
+    assert len(orders) == 1
+    broker.submit(orders[0])
+
+    book = _book()
+    book.bid_price = 99.0
+    book.ask_price = 100.0
+
+    fills = broker.process(symbol="BTCUSDT", now=event_time + timedelta(seconds=1), book=book)
+
+    assert len(fills) == 1
+    assert fills[0].is_maker is False
+    assert fills[0].side == -1
+    assert broker.pending_order_count == 0
+    assert broker.lifecycle_reason_counts["soft_exit_limit_adverse_escalation"] == 1

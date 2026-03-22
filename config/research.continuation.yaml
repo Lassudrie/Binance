@@ -1,0 +1,62 @@
+strategy_name: continuation
+notes: >
+  Bounded continuation search on recorded live paper data. Final test remains untouched
+  until a single validation winner is selected.
+
+paths:
+  registry_dir: data/research/registry
+  artifacts_dir: data/research/runs
+  deployment_dir: data/research/deployments
+  active_paper_config_path: data/research/deployments/active.paper.yaml
+
+dataset:
+  raw_input_path: data/raw/raw_run_20260321_091349.parquet
+  timestamp_column: event_time
+  train_ratio: 0.50
+  validation_ratio: 0.25
+  test_ratio: 0.25
+  stability_subperiods: 4
+  walk_forward_windows: 3
+  walk_forward_train_ratio: 0.60
+  min_unique_timestamps: 120
+
+generation:
+  method: grid
+  max_variants: 8
+  top_k_train: 4
+  top_k_validation: 1
+  seed: 42
+
+scoring:
+  min_trades: 3
+  pnl_scale: 2.0
+  drawdown_scale: 4.0
+  expectancy_scale: 0.15
+  max_drawdown_abs: 6.0
+  min_profit_factor: 0.85
+  min_win_rate: 0.40
+
+robustness:
+  min_subperiod_positive_ratio: 0.50
+  min_walk_forward_positive_ratio: 0.50
+  min_stressed_positive_ratio: 0.50
+  min_neighbor_positive_ratio: 0.50
+  stressed_maker_fee_multipliers: [1.0, 1.25]
+  stressed_taker_fee_multipliers: [1.0, 1.25]
+  stressed_impact_multipliers: [1.0, 1.25]
+  stressed_latency_ms_add: [0, 100]
+
+selection:
+  min_validation_score_delta: 0.02
+  min_test_score_delta: 0.00
+  max_drawdown_increase_abs: 2.0
+  require_test_improvement: true
+  paper_window_minutes: 60
+
+param_spaces:
+  min_expected_net_edge_bps:
+    values: [2.5, 3.0]
+  no_trade_z:
+    values: [1.20, 1.35]
+  min_edge_cost_ratio:
+    values: [1.00, 1.25]

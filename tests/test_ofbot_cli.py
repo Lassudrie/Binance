@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from pathlib import Path
 
-from ofbot.cli._main import _run_live, _run_paper_order
+from ofbot.cli._main import _make_async_signal_handler, _run_live, _run_paper_order
 from ofbot.utils.manual_orders import iter_manual_order_requests
 from tests.ofbot_helpers import build_test_config
 
@@ -52,6 +53,46 @@ def test_run_live_honors_max_seconds_without_events(monkeypatch, tmp_path) -> No
     monkeypatch.setattr("ofbot.cli._main.BinancePublicWebSocket", _IdleWebSocket)
 
     asyncio.run(_run_live("ignored.yaml", max_events=0, max_seconds=1, symbols=None))
+
+    assert fake_engine.processed == 0
+    assert fake_engine.finalized is True
+    assert fake_engine.closed is True
+
+
+def test_make_async_signal_handler_schedules_callback_on_loop() -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        seen: list[str] = []
+        handler = _make_async_signal_handler(loop, seen.append)
+        handler(signal.SIGTERM, None)
+        loop.call_soon(loop.stop)
+        loop.run_forever()
+    finally:
+        loop.close()
+
+    assert seen == ["SIGTERM"]
+
+
+def test_run_live_finalizes_on_signal_termination(monkeypatch, tmp_path) -> None:
+    config = build_test_config(tmp_path, symbols=["BTCUSDT"], mode="paper_local")
+    fake_engine = _FakeEngine(config)
+
+    monkeypatch.setattr("ofbot.cli._main.load_config", lambda path: config)
+    monkeypatch.setattr("ofbot.cli._main.BinancePublicRestClient", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        "ofbot.cli._main.PaperEngine",
+        lambda config, depth_snapshot_client=None: fake_engine,
+    )
+    monkeypatch.setattr("ofbot.cli._main.BinancePublicWebSocket", _IdleWebSocket)
+
+    def _fake_install(_loop, callback):
+        _loop.call_soon(callback, "SIGTERM")
+        return []
+
+    monkeypatch.setattr("ofbot.cli._main._install_live_signal_handlers", _fake_install)
+    monkeypatch.setattr("ofbot.cli._main._restore_live_signal_handlers", lambda handlers: None)
+
+    asyncio.run(_run_live("ignored.yaml", max_events=0, max_seconds=0, symbols=None))
 
     assert fake_engine.processed == 0
     assert fake_engine.finalized is True

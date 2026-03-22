@@ -68,6 +68,8 @@ class ExecutionConfig(BaseModel):
     limit_order_book_depth_bps: float = 3.0
     max_order_lifetime_s: int = 8
     allow_limit_orders: bool = True
+    soft_exit_limit_ttl_s: float = 2.0
+    soft_exit_limit_adverse_bps: float = 1.0
 
     @field_validator("mode")
     @classmethod
@@ -86,6 +88,7 @@ class RiskKillSwitchConfig(BaseModel):
     max_notional: float = 50_000.0
     max_concurrent_exposure: int = 2
     cooldown_after_loss_s: int = 300
+    cooldown_after_trade_s: int = 0
     daily_loss_limit: float = 0.02
     max_holding_time_s: int = 900
     catastrophic_stop_loss_bps: float = 45.0

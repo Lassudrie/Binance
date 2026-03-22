@@ -1,0 +1,14 @@
+{
+  "active_candidate_id": null,
+  "active_paper_config_path": "/home/alex/projects/Binance/data/research/deployments/active.paper.yaml",
+  "base_config_path": "config/local.paper.yaml",
+  "campaign_dir": "/home/alex/projects/Binance/data/research/campaigns/campaign_20260322_061206",
+  "campaign_id": "campaign_20260322_061206",
+  "research_config_path": "config/research.continuation.campaign.yaml",
+  "session_seconds": 600,
+  "sessions_completed": 0,
+  "sessions_requested": 10,
+  "started_at": "2026-03-22T06:12:06.987429+00:00",
+  "status": "running",
+  "symbols": []
+}

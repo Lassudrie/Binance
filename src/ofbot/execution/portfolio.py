@@ -146,7 +146,8 @@ class PaperPortfolio:
         current_qty = self.positions.get(symbol, 0.0)
         current_avg = self.avg_price.get(symbol, 0.0)
         current_time = fill.event_time
-        context = dict(self.risk_context.get(symbol, {}))
+        current_context = dict(self.risk_context.get(symbol, {}))
+        fill_context = dict(fill.context or {})
 
         fill_qty_signed = fill.fill_qty * (1 if fill.side > 0 else -1)
         self.cash -= fill_qty_signed * fill.fill_price
@@ -155,7 +156,7 @@ class PaperPortfolio:
         self.last_price[symbol] = fill.fill_price
 
         if abs(current_qty) < EPSILON:
-            self._open_position(symbol, fill, current_time, context, fee=fill.fee, qty=fill.fill_qty)
+            self._open_position(symbol, fill, current_time, fill_context, fee=fill.fee, qty=fill.fill_qty)
             return []
 
         if (current_qty > 0 and fill.side > 0) or (current_qty < 0 and fill.side < 0):
@@ -167,6 +168,9 @@ class PaperPortfolio:
             self.positions[symbol] = current_qty + fill_qty_signed
             self.unrealized_pnl[symbol] = self.positions[symbol] * (fill.fill_price - self.avg_price[symbol])
             self.position_open_time.setdefault(symbol, current_time)
+            if fill_context:
+                current_context.update(fill_context)
+                self.risk_context[symbol] = current_context
             self._record_entry_fill(symbol, fill_qty=fill.fill_qty, fill_price=fill.fill_price, fee=fill.fee, spread_bps=fill.spread_bps, fill_time=current_time)
             return []
 
@@ -207,7 +211,7 @@ class PaperPortfolio:
                 symbol,
                 fill,
                 current_time,
-                context,
+                fill_context,
                 fee=remaining_fee,
                 qty=remaining_qty,
             )
@@ -216,7 +220,7 @@ class PaperPortfolio:
             self.avg_price[symbol] = current_avg
             self.position_open_time[symbol] = open_time
             self.unrealized_pnl[symbol] = new_qty * (fill.fill_price - self.avg_price[symbol])
-            self.risk_context[symbol] = context
+            self.risk_context[symbol] = current_context
 
         if trade is None:
             return []

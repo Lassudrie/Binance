@@ -4,7 +4,7 @@ symbols:
   - ETHUSDT
 feature_profile: orderflow_hft_v1
 universe_seed: 31
-live_telemetry_interval_s: 30
+live_telemetry_interval_s: 10
 live_telemetry_top_k: 3
 raw_dir: data/raw
 reports_dir: reports
@@ -38,42 +38,45 @@ features:
 
 execution:
   mode: paper_local
-  allow_short: false
+  allow_short: true
   initial_cash: 100000.0
   taker_fee_bps: 8.0
   maker_fee_bps: 2.0
-  default_target_notional_usd: 500.0
-  min_target_notional_usd: 250.0
-  max_target_notional_usd: 1000.0
+  default_target_notional_usd: 150.0
+  min_target_notional_usd: 50.0
+  max_target_notional_usd: 250.0
   base_spread_bps: 2.0
   fallback_half_spread_bps: 1.0
   impact_bps_per_unit_participation: 8.0
   market_sweep_depth_bps: 25.0
-  latency_ms: 250
+  latency_ms: 150
   market_participation_cap: 0.25
-  limit_order_book_depth_bps: 3.0
-  max_order_lifetime_s: 8
+  limit_order_book_depth_bps: 0.0
+  max_order_lifetime_s: 5
   allow_limit_orders: true
+  soft_exit_limit_ttl_s: 2.0
+  soft_exit_limit_adverse_bps: 0.75
 
 risk:
   stale_data_s: 6.0
   broken_ws_s: 10.0
   abnormal_spread_bps: 220.0
   abnormal_volatility_bps: 900.0
-  max_position_size: 8.0
+  max_position_size: 4.0
   max_notional: 40000.0
   max_concurrent_exposure: 2
-  cooldown_after_loss_s: 300
+  cooldown_after_loss_s: 0
+  cooldown_after_trade_s: 3
   daily_loss_limit: 0.02
-  max_holding_time_s: 1200
+  max_holding_time_s: 30
   catastrophic_stop_loss_bps: 45.0
-  min_hold_before_soft_exit_s: 20
-  stop_loss_bps: 20.0
-  take_profit_bps: 35.0
-  trailing_stop_bps: 12.0
+  min_hold_before_soft_exit_s: 4
+  stop_loss_bps: 8.0
+  take_profit_bps: 14.0
+  trailing_stop_bps: 4.0
   spread_gate_enabled: true
   volatility_gate_enabled: true
-  max_consecutive_losses: 5
+  max_consecutive_losses: 99
 
 strategy_library:
   default: continuation
@@ -81,26 +84,42 @@ strategy_library:
     name: continuation
     enabled: true
     params:
-      trend_alignment_threshold: 0.20
-      queue_imbalance_threshold: 0.99
-      microprice_drift_threshold_bps: 0.20
-      min_expected_net_edge_bps: 2.0
-      edge_fast_horizon_s: 15
-      edge_slow_horizon_s: 30
-      edge_fast_weight: 0.6
-      edge_slow_weight: 0.4
-      edge_cvd_bonus_bps: 1.5
-      edge_queue_bonus_bps: 4.0
-      edge_bonus_cap_bps: 12.0
-      min_momentum_5s_bps: 0.8
-      no_trade_z: 1.20
-      max_holding_time_s: 720
-      min_hold_before_discretionary_exit_s: 20
-      reverse_exit_cvd_z: 1.0
-      reverse_exit_queue_imbalance: 0.85
-      reverse_exit_microprice_drift_bps: 0.1
-      spread_bps_max: 1.0
-      volatility_bps_max: 700.0
+      trend_alignment_threshold: 0.03
+      queue_imbalance_threshold: 0.01
+      microprice_drift_threshold_bps: 0.1
+      min_expected_net_edge_bps: 0.75
+      expected_move_discount: 0.9
+      edge_fast_horizon_s: 1
+      edge_slow_horizon_s: 5
+      edge_fast_weight: 0.85
+      edge_slow_weight: 0.15
+      edge_cvd_bonus_bps: 2.0
+      edge_queue_bonus_bps: 6.0
+      edge_bonus_cap_bps: 20.0
+      min_momentum_5s_bps: 0.4
+      min_edge_cost_ratio: 1.15
+      min_fee_coverage_ratio: 1.35
+      require_trend_up_regime: false
+      require_trend_down_regime_for_short: false
+      revalidate_on_fill: true
+      revalidate_grace_period_s: 2.0
+      revalidate_drop_on_neutral: false
+      strong_signal_expected_move_discount: 0.95
+      strong_signal_min_edge_cost_ratio: 1.05
+      strong_signal_min_momentum_5s_bps: 5.0
+      strong_signal_min_cvd_z: 2.0
+      no_trade_z: 0.35
+      max_holding_time_s: 30
+      min_hold_before_discretionary_exit_s: 4
+      reverse_exit_cvd_z: 0.85
+      reverse_exit_queue_imbalance: 0.45
+      reverse_exit_microprice_drift_bps: 0.08
+      reverse_exit_min_abs_pnl_bps: 3.0
+      spread_bps_max: 12.0
+      volatility_bps_max: 1200.0
+      order_type: limit
+      exit_order_type: limit
+      exit_cost_order_type: limit
   exhaustion:
     name: exhaustion
     enabled: false

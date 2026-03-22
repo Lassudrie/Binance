@@ -204,6 +204,26 @@ def _ensure_silver_dataset_range(config: Any, symbol: str, dataset_type: str) ->
     )
 
 
+def _gold_features_need_rebuild(
+    config: Any,
+    *,
+    dataset_type: str,
+    symbol: str,
+    path: Path,
+) -> bool:
+    if not path.exists():
+        return True
+
+    gold_mtime = path.stat().st_mtime
+    for source_date in iter_dates(config.dataset.start_date, config.dataset.end_date):
+        silver_path = _silver_partition_path(config, dataset_type, symbol, source_date)
+        if not silver_path.exists():
+            return True
+        if silver_path.stat().st_mtime > gold_mtime:
+            return True
+    return False
+
+
 def _load_gold_features(
     config: Any,
     symbols: list[str],
@@ -216,7 +236,12 @@ def _load_gold_features(
     for symbol in symbols:
         _ensure_silver_dataset_range(config, symbol, resolved_dataset_type)
         path = _gold_feature_path(config, symbol, resolved_dataset_type)
-        if force_rebuild or not path.exists():
+        if force_rebuild or _gold_features_need_rebuild(
+            config,
+            dataset_type=resolved_dataset_type,
+            symbol=symbol,
+            path=path,
+        ):
             path = build_feature_dataset(config, symbol, dataset_type=resolved_dataset_type)
         frames.append(pl.read_parquet(path))
     return pl.concat(frames, how="vertical").sort(["bar_end", "symbol"])

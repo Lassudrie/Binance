@@ -68,6 +68,7 @@ class PaperEngine:
             max_notional=config.risk.max_notional,
             max_concurrent_exposure=config.risk.max_concurrent_exposure,
             cooldown_after_loss_s=config.risk.cooldown_after_loss_s,
+            cooldown_after_trade_s=config.risk.cooldown_after_trade_s,
             daily_loss_limit=config.risk.daily_loss_limit,
             max_holding_time_s=config.risk.max_holding_time_s,
             catastrophic_stop_loss_bps=config.risk.catastrophic_stop_loss_bps,
@@ -225,11 +226,17 @@ class PaperEngine:
 
             if abs(state.net_position) > 0:
                 exit_side = -1 if state.net_position > 0 else 1
-                exit_cost = estimate_market_order_cost(
+                preferred_exit_order_type = str(
+                    state.risk_context.get("preferred_exit_order_type", "market") or "market"
+                ).lower()
+                if preferred_exit_order_type not in {"market", "limit"}:
+                    preferred_exit_order_type = "market"
+                exit_cost = estimate_order_cost(
                     self.config.execution,
                     book=book,
                     side=exit_side,
                     requested_qty=abs(state.net_position),
+                    order_type=preferred_exit_order_type,
                 )
                 risk_exit = self.risk.evaluate_position_exit(
                     symbol=symbol,
@@ -377,8 +384,8 @@ class PaperEngine:
                 reason=request.reason,
                 confidence=1.0,
                 order_type=request.order_type,
-                entry_context=context,
-            )
+                    entry_context=context,
+                )
 
         mid_price = float(snapshot.mid_price or 0.0)
         if mid_price <= EPSILON:
@@ -504,29 +511,75 @@ class PaperEngine:
     ) -> tuple[dict[str, float | int | str | bool | None], str | None]:
         side = 1 if getattr(decision, "side", 0) > 0 else -1
         order_type = str(getattr(decision, "order_type", "market") or "market").lower()
+        if order_type not in {"market", "limit"}:
+            order_type = "market"
         strategy = self.strategies.get(strategy_name)
         params = strategy.get_parameters() if strategy is not None else {}
+        exit_cost_order_type = str(params.get("exit_cost_order_type", "market") or "market").lower()
+        if exit_cost_order_type not in {"market", "limit"}:
+            exit_cost_order_type = "market"
         min_expected_net_edge_bps = float(params.get("min_expected_net_edge_bps", 0.0) or 0.0)
+        min_edge_cost_ratio = max(0.0, float(params.get("min_edge_cost_ratio", 0.0) or 0.0))
+        min_fee_coverage_ratio = max(0.0, float(params.get("min_fee_coverage_ratio", 0.0) or 0.0))
         mid_price = float(snapshot.mid_price or 0.0)
         if mid_price <= EPSILON:
             return {"expected_net_edge_bps": None}, "risk_expected_net_edge"
 
         seed_notional = self.config.execution.default_target_notional_usd
         seed_qty = max(seed_notional / mid_price, EPSILON)
-        seed_cost_estimate = estimate_order_cost(
+        seed_entry_cost_estimate = estimate_order_cost(
             self.config.execution,
             book=self.order_books.get(snapshot.symbol),
             side=side,
             requested_qty=seed_qty,
             order_type=order_type,
         )
+        seed_exit_cost_estimate = estimate_order_cost(
+            self.config.execution,
+            book=self.order_books.get(snapshot.symbol),
+            side=-side,
+            requested_qty=seed_qty,
+            order_type=exit_cost_order_type,
+        )
         move_components = self._expected_move_proxy_components(
             snapshot,
             side=side,
             strategy_params=params,
         )
-        expected_move_proxy_bps = move_components["expected_move_proxy_bps"]
-        seed_expected_net_edge_bps = expected_move_proxy_bps - seed_cost_estimate.roundtrip_cost_bps
+        raw_expected_move_proxy_bps = move_components["expected_move_proxy_bps"]
+        expected_move_discount = clamp(float(params.get("expected_move_discount", 1.0) or 1.0), 0.0, 1.0)
+        strong_signal_expected_move_discount = params.get("strong_signal_expected_move_discount")
+        strong_signal_min_edge_cost_ratio = params.get("strong_signal_min_edge_cost_ratio")
+        strong_signal_min_momentum_5s_bps = max(
+            0.0,
+            float(params.get("strong_signal_min_momentum_5s_bps", 0.0) or 0.0),
+        )
+        strong_signal_min_cvd_z = max(
+            0.0,
+            float(params.get("strong_signal_min_cvd_z", 0.0) or 0.0),
+        )
+        strong_signal_applied = False
+        if strong_signal_expected_move_discount is not None:
+            strong_discount = clamp(float(strong_signal_expected_move_discount or 0.0), 0.0, 1.0)
+            momentum_5s = float(move_components.get("signal_momentum_bps_5s", 0.0) or 0.0)
+            cvd_z = float(move_components.get("signal_cvd_base_1s_z", 0.0) or 0.0)
+            if (
+                snapshot.regime.trend == "trend_up"
+                and snapshot.regime.flow == "high"
+                and momentum_5s >= strong_signal_min_momentum_5s_bps
+                and cvd_z >= strong_signal_min_cvd_z
+                and strong_discount > expected_move_discount
+            ):
+                expected_move_discount = strong_discount
+                strong_signal_applied = True
+        expected_move_proxy_bps = raw_expected_move_proxy_bps * expected_move_discount
+        if strong_signal_applied and strong_signal_min_edge_cost_ratio is not None:
+            min_edge_cost_ratio = min(
+                min_edge_cost_ratio,
+                max(0.0, float(strong_signal_min_edge_cost_ratio or 0.0)),
+            )
+        seed_roundtrip_cost_bps = seed_entry_cost_estimate.one_way_cost_bps + seed_exit_cost_estimate.one_way_cost_bps
+        seed_expected_net_edge_bps = expected_move_proxy_bps - seed_roundtrip_cost_bps
         confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
         confidence_multiplier = clamp(0.5 + confidence, 0.75, 1.25)
         edge_floor = max(min_expected_net_edge_bps, 1.0)
@@ -537,30 +590,57 @@ class PaperEngine:
             self.config.execution.max_target_notional_usd,
         )
         resolved_target_qty = desired_notional_usd / mid_price
-        cost_estimate = estimate_order_cost(
+        entry_cost_estimate = estimate_order_cost(
             self.config.execution,
             book=self.order_books.get(snapshot.symbol),
             side=side,
             requested_qty=resolved_target_qty,
             order_type=order_type,
         )
-        expected_net_edge_bps = expected_move_proxy_bps - cost_estimate.roundtrip_cost_bps
-        entry_context: dict[str, float | int | str | bool | None] = {
-            "entry_order_type": order_type,
-            "expected_move_proxy_bps": expected_move_proxy_bps,
-            "roundtrip_cost_est_bps": cost_estimate.roundtrip_cost_bps,
-            "estimated_entry_cost_bps": cost_estimate.one_way_cost_bps,
-            "expected_net_edge_bps": expected_net_edge_bps,
-            "participation_rate": cost_estimate.participation_rate,
-            "top_of_book_qty": cost_estimate.top_of_book_qty,
-            "confidence_multiplier": confidence_multiplier,
-            "edge_multiplier": edge_multiplier,
-            "desired_notional_usd": desired_notional_usd,
-            "resolved_target_qty": resolved_target_qty,
-            "min_expected_net_edge_bps": min_expected_net_edge_bps,
-        }
-        entry_context.update(move_components)
-        if expected_net_edge_bps < min_expected_net_edge_bps:
+        exit_cost_estimate = estimate_order_cost(
+            self.config.execution,
+            book=self.order_books.get(snapshot.symbol),
+            side=-side,
+            requested_qty=resolved_target_qty,
+            order_type=exit_cost_order_type,
+        )
+        roundtrip_cost_est_bps = entry_cost_estimate.one_way_cost_bps + exit_cost_estimate.one_way_cost_bps
+        roundtrip_fee_bps = entry_cost_estimate.fee_bps + exit_cost_estimate.fee_bps
+        expected_net_edge_bps = expected_move_proxy_bps - roundtrip_cost_est_bps
+        edge_cost_ratio = expected_move_proxy_bps / max(roundtrip_cost_est_bps, EPSILON)
+        fee_coverage_ratio = expected_move_proxy_bps / max(roundtrip_fee_bps, EPSILON)
+        entry_context: dict[str, float | int | str | bool | None] = dict(move_components)
+        entry_context.update(
+            {
+                "entry_order_type": order_type,
+                "assumed_exit_order_type": exit_cost_order_type,
+                "raw_expected_move_proxy_bps": raw_expected_move_proxy_bps,
+                "expected_move_discount": expected_move_discount,
+                "strong_signal_applied": int(strong_signal_applied),
+                "expected_move_proxy_bps": expected_move_proxy_bps,
+                "roundtrip_cost_est_bps": roundtrip_cost_est_bps,
+                "roundtrip_fee_bps": roundtrip_fee_bps,
+                "estimated_entry_cost_bps": entry_cost_estimate.one_way_cost_bps,
+                "estimated_exit_cost_bps": exit_cost_estimate.one_way_cost_bps,
+                "expected_net_edge_bps": expected_net_edge_bps,
+                "edge_cost_ratio": edge_cost_ratio,
+                "fee_coverage_ratio": fee_coverage_ratio,
+                "participation_rate": entry_cost_estimate.participation_rate,
+                "top_of_book_qty": entry_cost_estimate.top_of_book_qty,
+                "confidence_multiplier": confidence_multiplier,
+                "edge_multiplier": edge_multiplier,
+                "desired_notional_usd": desired_notional_usd,
+                "resolved_target_qty": resolved_target_qty,
+                "min_expected_net_edge_bps": min_expected_net_edge_bps,
+                "min_edge_cost_ratio": min_edge_cost_ratio,
+                "min_fee_coverage_ratio": min_fee_coverage_ratio,
+            }
+        )
+        if (
+            expected_net_edge_bps < min_expected_net_edge_bps
+            or edge_cost_ratio < min_edge_cost_ratio
+            or fee_coverage_ratio < min_fee_coverage_ratio
+        ):
             return entry_context, "risk_expected_net_edge"
         return entry_context, None
 
@@ -630,6 +710,14 @@ class PaperEngine:
             "expected_slow_component_bps": slow_component,
             "expected_cvd_bonus_bps": cvd_bonus,
             "expected_queue_bonus_bps": queue_bonus,
+            "signal_cvd_base_1s_z": cvd_z,
+            "signal_queue_imbalance": queue_imbalance,
+            "signal_momentum_bps_5s": self._directional_feature_bps(
+                snapshot,
+                side=side,
+                primary="momentum_bps_5s",
+                fallback="short_return_bps_5s",
+            ),
         }
 
     def _directional_feature_bps(
@@ -649,6 +737,12 @@ class PaperEngine:
         return max(0.0, value)
 
     def _process_fills(self, snapshot: FeatureSnapshot, *, processing_time: datetime) -> None:
+        state = self.portfolio.snapshot(snapshot.symbol)
+        self._drop_invalidated_pending_entries(
+            snapshot=snapshot,
+            state=state,
+            processing_time=processing_time,
+        )
         fills = self.broker.process(
             symbol=snapshot.symbol,
             now=processing_time,
@@ -682,6 +776,52 @@ class PaperEngine:
             )
             for trade in self.portfolio.apply_fill(fill):
                 self._on_closed_trade(trade)
+
+    def _drop_invalidated_pending_entries(
+        self,
+        *,
+        snapshot: FeatureSnapshot,
+        state: PositionSnapshot,
+        processing_time: datetime,
+    ) -> None:
+        pending_orders = self.broker.pending_orders(snapshot.symbol)
+        if not pending_orders:
+            return
+
+        def should_drop(order: Any) -> bool:
+            if not bool((order.context or {}).get("revalidate_on_fill")):
+                return False
+            grace_period_s = max(0.0, float((order.context or {}).get("revalidate_grace_period_s", 0.0) or 0.0))
+            order_age_s = max(0.0, (processing_time - getattr(order, "event_time", processing_time)).total_seconds())
+            if order_age_s < grace_period_s:
+                return False
+
+            target_qty = float(getattr(order, "target_qty", 0.0))
+            if not self._requires_entry_gate(current_qty=state.net_position, projected_qty=target_qty):
+                return False
+
+            strategy_name = str(getattr(order, "strategy_id", "") or (order.context or {}).get("strategy") or "")
+            strategy = self.strategies.get(strategy_name)
+            if strategy is None:
+                return False
+
+            decision = strategy.decide(snapshot, state, long_only=self.long_only)
+            if decision is None:
+                return bool((order.context or {}).get("revalidate_drop_on_neutral", True))
+
+            projected_qty = self._normalize_target_qty(decision)
+            if not self._requires_entry_gate(current_qty=state.net_position, projected_qty=projected_qty):
+                return True
+            return projected_qty * float(getattr(order, "side", 0.0)) <= EPSILON
+
+        dropped = self.broker.drop_pending_orders(
+            symbol=snapshot.symbol,
+            now=processing_time,
+            reason="signal_invalidated",
+            predicate=should_drop,
+        )
+        if dropped > 0:
+            self._live_counters["pending_entry_invalidations"] += dropped
 
     def _on_closed_trade(self, trade: TradeRecord) -> None:
         self._live_counters["trades_closed"] += 1
@@ -722,7 +862,7 @@ class PaperEngine:
         decision_time: datetime,
     ) -> None:
         strategy_id = active_strategy
-        reference = snapshot.mid_price or 0.0
+        reference = self._decision_reference_price(snapshot=snapshot, decision=decision)
 
         context = dict(getattr(decision, "entry_context", {}) or {})
         context["strategy"] = strategy_id
@@ -863,6 +1003,19 @@ class PaperEngine:
             return -abs(desired_qty)
         return 0.0
 
+    def _decision_reference_price(self, *, snapshot: FeatureSnapshot, decision: Any) -> float:
+        book = self.order_books.get(snapshot.symbol)
+        mid_price = float(snapshot.mid_price or 0.0)
+        order_type = str(getattr(decision, "order_type", "market") or "market").lower()
+        if order_type != "limit":
+            return mid_price
+        side = int(getattr(decision, "side", 0) or 0)
+        if side > 0:
+            return float(book.ask_price or mid_price or 0.0)
+        if side < 0:
+            return float(book.bid_price or mid_price or 0.0)
+        return mid_price
+
     def _requires_entry_gate(self, *, current_qty: float, projected_qty: float) -> bool:
         if abs(projected_qty) <= EPSILON:
             return False
@@ -911,7 +1064,7 @@ class PaperEngine:
             candidate_raw_path = self.config.paths.raw_dir / f"raw_{self.journal.run_id}.parquet"
             if candidate_raw_path.exists():
                 learning_input_path = candidate_raw_path
-        if self._final_report_path is not None:
+        if self._final_report_path is not None and self.config.learning.enabled:
             learning_mod.advance_learning_cycle(
                 store=self.store,
                 config=self.config,
